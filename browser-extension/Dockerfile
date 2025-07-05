@@ -7,7 +7,7 @@ COPY . .
 RUN pnpm run build
 
 # Stage 2: Package
-FROM alpine:3.18
+FROM alpine:3.22
 WORKDIR /extension
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/manifest.json ./manifest.json
