@@ -3,12 +3,14 @@ Main entry point for the Veritas Data Pipeline package.
 """
 import os
 from typing import List, Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 import structlog
 from dotenv import load_dotenv
+from datetime import datetime, UTC
 
 from .services.document_processor import DocumentProcessor
 from .services.embedding_service import EmbeddingService
@@ -69,32 +71,10 @@ class BatchUploadResponse(BaseModel):
     rejected_files: int
     message: str
 
-# Create FastAPI app
-app = FastAPI(
-    title="Veritas Data Pipeline",
-    description="Document ingestion and processing pipeline for Veritas AI Agent",
-    version="1.1.0",
-    docs_url="/docs" if os.getenv("ENVIRONMENT") != "production" else None,
-    redoc_url="/redoc" if os.getenv("ENVIRONMENT") != "production" else None
-)
-
-# Add middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=os.getenv("ALLOWED_HOSTS", "*").split(",")
-)
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI app"""
+    # Startup
     global document_processor, embedding_service, ipfs_service, database_service, metrics_service
     
     try:
@@ -112,12 +92,39 @@ async def startup_event():
     except Exception as e:
         logger.error("Failed to initialize services", error=str(e))
         raise
+    
+    yield
+    
+    # Shutdown
+    try:
+        await database_service.close()
+        logger.info("Data pipeline shutdown complete")
+    except Exception as e:
+        logger.error("Error during shutdown", error=str(e))
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    await database_service.close()
-    logger.info("Data pipeline shutdown complete")
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title="Veritas Data Pipeline",
+    description="Document ingestion and processing pipeline for Veritas AI Agent",
+    version="1.1.0",
+    docs_url="/docs" if os.getenv("ENVIRONMENT") != "production" else None,
+    redoc_url="/redoc" if os.getenv("ENVIRONMENT") != "production" else None,
+    lifespan=lifespan
+)
+
+# Add middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=os.getenv("ALLOWED_HOSTS", "*").split(",")
+)
 
 @app.get("/health")
 async def health_check():
@@ -134,7 +141,7 @@ async def health_check():
         
         return {
             "status": "healthy" if healthy else "degraded",
-            "timestamp": structlog.processors.TimeStamper(fmt="iso")(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "version": "1.1.0",
             "services": services
         }
@@ -142,7 +149,7 @@ async def health_check():
         logger.error("Health check failed", error=str(e))
         return {
             "status": "unhealthy",
-            "timestamp": structlog.processors.TimeStamper(fmt="iso")(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "error": str(e)
         }
 

@@ -1,8 +1,15 @@
-import { FastifyRequest, FastifyReply } from 'fastify';
+import { FastifyRequest, FastifyReply, preHandlerHookHandler } from 'fastify';
 import { Logger } from 'winston';
-import crypto from 'crypto';
-import Redis from 'redis';
+import * as crypto from 'crypto';
+import * as Redis from 'redis';
 import { ValidationService } from '../services/validation.service';
+import { DatabaseService } from '../services/database.service';
+import { IncomingHttpHeaders } from 'http';
+
+// Declare global type for rate limit store
+declare global {
+  var rateLimitStore: Map<string, { count: number; resetTime: number }> | undefined;
+}
 
 const validationService = new ValidationService();
 
@@ -28,7 +35,11 @@ export interface AuthenticatedRequest extends FastifyRequest {
   url: string;
 }
 
-export const authMiddleware = (logger: Logger, redisClient?: Redis.RedisClientType) => {
+export const authMiddleware = (
+  logger: Logger, 
+  databaseService: DatabaseService,
+  redisClient?: Redis.RedisClientType
+) => {
   return async (request: AuthenticatedRequest, reply: FastifyReply) => {
     try {
       const authHeader = request.headers.authorization;
@@ -95,7 +106,7 @@ export const authMiddleware = (logger: Logger, redisClient?: Redis.RedisClientTy
       }
 
       // Validate API key and get info
-      const apiKeyInfo = await validateApiKey(apiKey);
+      const apiKeyInfo = await validateApiKey(apiKey, databaseService);
       if (!apiKeyInfo) {
         logger.warn('Invalid API key', {
           ip: request.ip,
@@ -111,7 +122,7 @@ export const authMiddleware = (logger: Logger, redisClient?: Redis.RedisClientTy
       }
 
       // Check quota limits
-      const quotaResult = await checkQuotaLimits(apiKey, apiKeyInfo.quota);
+      const quotaResult = await checkQuotaLimits(apiKeyInfo.id, apiKeyInfo.quota, databaseService);
       if (!quotaResult.allowed) {
         logger.warn('Quota limit exceeded', {
           ip: request.ip,
@@ -136,7 +147,7 @@ export const authMiddleware = (logger: Logger, redisClient?: Redis.RedisClientTy
       }
 
       // Check rate limiting
-      const rateLimitResult = await checkRateLimit(apiKey, request.ip || 'unknown', apiKeyInfo.rateLimit);
+      const rateLimitResult = await checkRateLimit(apiKey, request.ip || 'unknown', apiKeyInfo.rateLimit, redisClient);
       if (!rateLimitResult.allowed) {
         logger.warn('Rate limit exceeded', {
           ip: request.ip,
@@ -216,27 +227,34 @@ function isValidApiKeyFormat(apiKey: string): boolean {
   return apiKeyPattern.test(apiKey);
 }
 
-async function validateApiKey(apiKey: string): Promise<any> {
-  // In production, this would validate against a database
-  // For now, we'll use environment variables for demo
-  const validApiKeys = process.env.VALID_API_KEYS?.split(',') || [];
-  
-  if (!validApiKeys.includes(apiKey)) {
+async function validateApiKey(apiKey: string, databaseService: DatabaseService): Promise<any> {
+  try {
+    const apiKeyData = await databaseService.validateApiKey(apiKey);
+    
+    if (!apiKeyData) {
+      return null;
+    }
+    
+    // Get current usage
+    const usage = await databaseService.getApiKeyUsage(apiKeyData.id);
+    
+    return {
+      id: apiKeyData.id,
+      permissions: apiKeyData.permissions,
+      rateLimit: apiKeyData.rateLimit,
+      userId: apiKeyData.userId,
+      organization: apiKeyData.organization,
+      tier: apiKeyData.tier,
+      quota: {
+        daily: apiKeyData.dailyQuota,
+        monthly: apiKeyData.monthlyQuota,
+        used: usage
+      },
+      expiresAt: apiKeyData.expiresAt
+    };
+  } catch (error) {
     return null;
   }
-
-  // Extract API key type from prefix
-  const prefix = apiKey.split('-')[0];
-  
-  return {
-    permissions: getApiKeyPermissions(prefix || ''),
-    rateLimit: getRateLimitForApiKey(prefix || ''),
-    userId: generateUserId(apiKey),
-    organization: getOrganizationForApiKey(prefix || ''),
-    tier: getTierForApiKey(prefix || ''),
-    quota: getQuotaForApiKey(prefix || ''),
-    expiresAt: null // No expiration for demo keys
-  };
 }
 
 interface RateLimitResult {
@@ -247,16 +265,52 @@ interface RateLimitResult {
   retryAfter: number;
 }
 
-async function checkRateLimit(apiKey: string, ip: string, rateLimit: number): Promise<RateLimitResult> {
-  // In production, this would use Redis
-  // For now, we'll implement a simple in-memory rate limiter
+async function checkRateLimit(apiKey: string, ip: string, rateLimit: number, redisClient?: Redis.RedisClientType): Promise<RateLimitResult> {
   const key = `rate_limit:${apiKey}:${ip}`;
   const window = 60; // 1 minute window
   const now = Math.floor(Date.now() / 1000);
   const windowStart = Math.floor(now / window) * window;
   
-  // Simple in-memory storage (replace with Redis in production)
-  const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
+  if (redisClient) {
+    try {
+      // Use Redis for rate limiting
+      const multi = redisClient.multi();
+      const rateLimitKey = `${key}:${windowStart}`;
+      
+      multi.incr(rateLimitKey);
+      multi.expire(rateLimitKey, window);
+      
+      const results = await multi.exec();
+      const count = results?.[0] as number || 0;
+      
+      if (count > rateLimit) {
+        return {
+          allowed: false,
+          limit: rateLimit,
+          remaining: 0,
+          resetTime: windowStart + window,
+          retryAfter: windowStart + window - now
+        };
+      }
+      
+      return {
+        allowed: true,
+        limit: rateLimit,
+        remaining: rateLimit - count,
+        resetTime: windowStart + window,
+        retryAfter: 0
+      };
+    } catch (error) {
+      // Fall back to in-memory if Redis fails
+      console.error('Redis rate limiting failed, falling back to in-memory:', error);
+    }
+  }
+  
+  // Fallback to in-memory storage (for development/testing)
+  const rateLimitStore = global.rateLimitStore || new Map<string, { count: number; resetTime: number }>();
+  if (!global.rateLimitStore) {
+    global.rateLimitStore = rateLimitStore;
+  }
   
   const current = rateLimitStore.get(key);
   if (!current || current.resetTime < now) {
@@ -298,115 +352,44 @@ interface QuotaResult {
   resetTime?: number;
 }
 
-async function checkQuotaLimits(apiKey: string, quota: { daily: number; monthly: number }): Promise<QuotaResult> {
-  const now = new Date();
-  const today = now.toISOString().split('T')[0];
-  const thisMonth = now.toISOString().substring(0, 7);
-  
-  // In production, this would use Redis or database
-  // For now, we'll use simple in-memory storage
-  const quotaStore = new Map<string, { daily: number; monthly: number; lastReset: string }>();
-  
-  const key = `quota:${apiKey}`;
-  const current = quotaStore.get(key);
-  
-  if (!current || current.lastReset !== today) {
-    quotaStore.set(typeof key === 'string' ? key : Array.isArray(key) ? key[0] : '', { daily: 1, monthly: 1, lastReset: today || '' });
+async function checkQuotaLimits(apiKeyId: string, quota: { daily: number; monthly: number }, databaseService: DatabaseService): Promise<QuotaResult> {
+  try {
+    const usage = await databaseService.getApiKeyUsage(apiKeyId);
+    
+    if (usage.daily >= quota.daily) {
+      return {
+        allowed: false,
+        limit: quota,
+        used: usage,
+        exceededType: 'daily',
+        resetTime: new Date().setHours(24, 0, 0, 0)
+      };
+    }
+    
+    if (usage.monthly >= quota.monthly) {
+      const now = new Date();
+      return {
+        allowed: false,
+        limit: quota,
+        used: usage,
+        exceededType: 'monthly',
+        resetTime: new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime()
+      };
+    }
+    
+    // Increment usage
+    await databaseService.incrementApiKeyUsage(apiKeyId);
+    
     return {
       allowed: true,
       limit: quota,
-      used: { daily: 1, monthly: 1 }
+      used: {
+        daily: usage.daily + 1,
+        monthly: usage.monthly + 1
+      }
     };
-  }
-  
-  const newDaily = current.daily + 1;
-  const newMonthly = current.monthly + 1;
-  
-  if (newDaily > quota.daily) {
-    return {
-      allowed: false,
-      limit: quota,
-      used: { daily: current.daily, monthly: current.monthly },
-      exceededType: 'daily',
-      resetTime: new Date(now.getTime() + 24 * 60 * 60 * 1000).getTime()
-    };
-  }
-  
-  if (newMonthly > quota.monthly) {
-    return {
-      allowed: false,
-      limit: quota,
-      used: { daily: current.daily, monthly: current.monthly },
-      exceededType: 'monthly',
-      resetTime: new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime()
-    };
-  }
-  
-  quotaStore.set(typeof key === 'string' ? key : Array.isArray(key) ? key[0] : '', { daily: newDaily, monthly: newMonthly, lastReset: today || '' });
-  return {
-    allowed: true,
-    limit: quota,
-    used: { daily: newDaily, monthly: newMonthly }
-  };
-}
-
-function getApiKeyPermissions(prefix: string): string[] {
-  switch (prefix) {
-    case 'veritas':
-      return ['read', 'write', 'admin'];
-    case 'researcher':
-      return ['read', 'write'];
-    case 'developer':
-      return ['read', 'write', 'analytics'];
-    case 'viewer':
-      return ['read'];
-    default:
-      return ['read'];
-  }
-}
-
-function getRateLimitForApiKey(prefix: string): number {
-  switch (prefix) {
-    case 'veritas':
-      return 1000; // 1000 requests per minute
-    case 'researcher':
-      return 100; // 100 requests per minute
-    case 'developer':
-      return 500; // 500 requests per minute
-    case 'viewer':
-      return 50; // 50 requests per minute
-    default:
-      return 10; // 10 requests per minute
-  }
-}
-
-function getTierForApiKey(prefix: string): string {
-  switch (prefix) {
-    case 'veritas':
-      return 'enterprise';
-    case 'researcher':
-      return 'professional';
-    case 'developer':
-      return 'developer';
-    case 'viewer':
-      return 'basic';
-    default:
-      return 'free';
-  }
-}
-
-function getQuotaForApiKey(prefix: string): { daily: number; monthly: number } {
-  switch (prefix) {
-    case 'veritas':
-      return { daily: 100000, monthly: 3000000 };
-    case 'researcher':
-      return { daily: 10000, monthly: 300000 };
-    case 'developer':
-      return { daily: 50000, monthly: 1500000 };
-    case 'viewer':
-      return { daily: 1000, monthly: 30000 };
-    default:
-      return { daily: 100, monthly: 3000 };
+  } catch (error) {
+    throw error;
   }
 }
 
@@ -415,18 +398,8 @@ function generateUserId(apiKey: string): string {
 }
 
 function getOrganizationForApiKey(prefix: string): string {
-  switch (prefix) {
-    case 'veritas':
-      return 'anything.ai';
-    case 'researcher':
-      return 'research-institution';
-    case 'developer':
-      return 'development-team';
-    case 'viewer':
-      return 'public';
-    default:
-      return 'unknown';
-  }
+  // This is now handled by the database
+  return 'unknown';
 }
 
 export function requirePermission(permission: string) {

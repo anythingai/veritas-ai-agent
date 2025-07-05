@@ -1,5 +1,7 @@
 import { Logger } from 'winston';
 import { register, Counter, Histogram, Gauge, collectDefaultMetrics } from 'prom-client';
+import { DatabaseService } from './database.service';
+import { CacheService } from './cache.service';
 
 export interface VerificationMetrics {
   claimLength: number;
@@ -67,7 +69,7 @@ export class MetricsService {
   private externalServiceLatency: Histogram;
   private databaseLatency: Histogram;
 
-  constructor(private logger: Logger) {
+  constructor(private logger: Logger, private databaseService: DatabaseService, private cacheService: CacheService) {
     // Initialize all Prometheus metrics
     this.verificationRequestsTotal = new Counter({
       name: 'veritas_verification_requests_total',
@@ -422,14 +424,37 @@ export class MetricsService {
   // Business metrics calculation
   async calculateBusinessMetrics(): Promise<BusinessMetrics> {
     try {
-      // This would typically query the database for business metrics
-      // For now, we'll return mock data
+      // Get analytics from database
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
+      
+      const analytics = await this.databaseService.getVerificationAnalytics(
+        yesterdayStart.toISOString(),
+        todayStart.toISOString()
+      );
+      
+      // Get unique users using the new method
+      const uniqueUsers = await this.databaseService.getUniqueUsers(
+        yesterdayStart.toISOString(),
+        todayStart.toISOString()
+      );
+      
+      // Get cache metrics
+      const cacheStats = await this.cacheService.getStats();
+      const cacheHitRate = cacheStats.hits > 0 ? 
+        cacheStats.hits / (cacheStats.hits + cacheStats.misses) : 0;
+      
+      // Calculate error rate from stored metrics
+      const errorRate = analytics.totalRequests > 0 ? 
+        (analytics.unknownCount / analytics.totalRequests) : 0;
+      
       return {
-        uniqueUsers: 1000,
-        dailyVerifications: 50000,
-        averageResponseTime: 0.3,
-        errorRate: 0.01,
-        cacheHitRate: 0.85
+        uniqueUsers,
+        dailyVerifications: analytics.totalRequests,
+        averageResponseTime: analytics.averageProcessingTime / 1000, // Convert to seconds
+        errorRate,
+        cacheHitRate
       };
     } catch (error) {
       this.logger.error('Failed to calculate business metrics:', error);

@@ -98,7 +98,10 @@ describe('Veritas Verification Service - Integration Tests', () => {
       validateApiKey: vi.fn().mockReturnValue(true),
       sanitizeInput: vi.fn().mockImplementation((input: string) => input),
       validateEmail: vi.fn().mockReturnValue(true),
-      validateURL: vi.fn().mockReturnValue(true)
+      validateURL: vi.fn().mockReturnValue(true),
+      validateVerificationRequest: vi.fn().mockReturnValue({ isValid: true, errors: [] }),
+      validateDocumentUpload: vi.fn().mockReturnValue({ isValid: true, errors: [] }),
+      generateValidationError: vi.fn().mockReturnValue({ isValid: false, errors: ['Validation error'] })
     };
 
     mockCacheService = {
@@ -301,6 +304,7 @@ describe('Veritas Verification Service - Integration Tests', () => {
 
       expect(response.statusCode).toBe(401);
       const result = JSON.parse(response.payload);
+      expect(result.error).toBe('Unauthorized');
       expect(result.code).toBe('MISSING_API_KEY');
     });
 
@@ -319,6 +323,7 @@ describe('Veritas Verification Service - Integration Tests', () => {
 
       expect(response.statusCode).toBe(401);
       const result = JSON.parse(response.payload);
+      expect(result.error).toBe('Unauthorized');
       expect(result.code).toBe('INVALID_API_KEY_FORMAT');
     });
 
@@ -337,6 +342,7 @@ describe('Veritas Verification Service - Integration Tests', () => {
 
       expect(response.statusCode).toBe(401);
       const result = JSON.parse(response.payload);
+      expect(result.error).toBe('Unauthorized');
       expect(result.code).toBe('INVALID_API_KEY');
     });
   });
@@ -497,7 +503,7 @@ describe('Veritas Verification Service - Integration Tests', () => {
 
       expect(response.statusCode).toBe(400);
       const result = JSON.parse(response.payload);
-      expect(result.error).toBe(true);
+      expect(result.error).toBe('Bad Request');
     });
 
     it('should handle database connection errors', async () => {

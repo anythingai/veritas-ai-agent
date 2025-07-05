@@ -167,11 +167,45 @@ class MetricsService:
         """Get content type for metrics endpoint"""
         return CONTENT_TYPE_LATEST
     
-    def get_business_metrics(self) -> Dict[str, Any]:
+    async def get_business_metrics(self) -> Dict[str, Any]:
         """Get business metrics summary"""
         try:
-            # This would typically query the database for business metrics
-            # For now, return a placeholder structure
+            # Query database for real business metrics
+            from ..services.database_service import DatabaseService
+            
+            db_service = DatabaseService()
+            await db_service.initialize()
+            
+            # Get document processing metrics
+            doc_stats = await db_service.get_document_statistics()
+            
+            # Get verification metrics
+            verification_stats = await db_service.get_verification_statistics()
+            
+            # Get processing time metrics
+            processing_stats = await db_service.get_processing_time_statistics()
+            
+            # Get popular MIME types
+            mime_stats = await db_service.get_mime_type_statistics()
+            
+            return {
+                'total_documents_processed': doc_stats.get('total_documents', 0),
+                'total_verifications': verification_stats.get('total_verifications', 0),
+                'average_processing_time': processing_stats.get('average_time', 0.0),
+                'success_rate': processing_stats.get('success_rate', 0.0),
+                'popular_mime_types': mime_stats.get('popular_types', []),
+                'verification_status_distribution': {
+                    'verified': verification_stats.get('verified_count', 0),
+                    'unverified': verification_stats.get('unverified_count', 0),
+                    'unknown': verification_stats.get('unknown_count', 0)
+                },
+                'daily_processing_volume': await db_service.get_daily_processing_volume(),
+                'error_rate': processing_stats.get('error_rate', 0.0),
+                'cache_hit_rate': await db_service.get_cache_statistics()
+            }
+        except Exception as e:
+            logger.error("Failed to get business metrics", error=str(e))
+            # Return fallback metrics structure
             return {
                 'total_documents_processed': 0,
                 'total_verifications': 0,
@@ -182,11 +216,11 @@ class MetricsService:
                     'verified': 0,
                     'unverified': 0,
                     'unknown': 0
-                }
+                },
+                'daily_processing_volume': [],
+                'error_rate': 0.0,
+                'cache_hit_rate': 0.0
             }
-        except Exception as e:
-            logger.error("Failed to get business metrics", error=str(e))
-            return {}
     
     def record_error(self, error_type: str, error_message: str) -> None:
         """Record error metrics"""

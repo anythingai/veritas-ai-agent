@@ -30,6 +30,31 @@ export interface SearchOptions {
   similarityThreshold: number;
 }
 
+export interface ApiKey {
+  id: string;
+  key: string;
+  userId: string;
+  organization: string;
+  permissions: string[];
+  tier: string;
+  dailyQuota: number;
+  monthlyQuota: number;
+  rateLimit: number;
+  isActive: boolean;
+  expiresAt?: Date;
+  createdAt: Date;
+  lastUsedAt?: Date;
+}
+
+export interface ApiKeyUsage {
+  id: string;
+  apiKeyId: string;
+  dailyUsage: number;
+  monthlyUsage: number;
+  usageDate: string;
+  usageMonth: string;
+}
+
 export class DatabaseService {
   constructor(private pool: Pool, private logger: Logger) {}
 
@@ -322,6 +347,132 @@ export class DatabaseService {
     }
   }
 
+  async getUniqueUsers(startDate?: string, endDate?: string): Promise<number> {
+    try {
+      let whereClause = 'WHERE 1=1';
+      const params: any[] = [];
+      let paramIndex = 1;
+      
+      if (startDate) {
+        whereClause += ` AND created_at >= $${paramIndex++}`;
+        params.push(startDate);
+      }
+      
+      if (endDate) {
+        whereClause += ` AND created_at <= $${paramIndex++}`;
+        params.push(endDate);
+      }
+      
+      const uniqueUsersQuery = `
+        SELECT COUNT(DISTINCT 
+          CASE 
+            WHEN source = 'extension' THEN substring(claim_text FROM 1 FOR 8)
+            ELSE source 
+          END
+        ) as unique_users
+        FROM verification_requests 
+        ${whereClause}
+      `;
+      
+      const result = await this.pool.query(uniqueUsersQuery, params);
+      return parseInt(result.rows[0]?.unique_users || '0');
+      
+    } catch (error) {
+      this.logger.error('Failed to get unique users count:', error);
+      throw error;
+    }
+  }
+
+  async validateApiKey(apiKey: string): Promise<ApiKey | null> {
+    try {
+      const result = await this.pool.query(
+        `SELECT ak.*, u.organization 
+         FROM api_keys ak 
+         JOIN users u ON ak.user_id = u.id 
+         WHERE ak.key = $1 AND ak.is_active = true 
+         AND (ak.expires_at IS NULL OR ak.expires_at > NOW())`,
+        [apiKey]
+      );
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+      
+      const row = result.rows[0];
+      
+      // Update last used timestamp
+      await this.pool.query(
+        'UPDATE api_keys SET last_used_at = NOW() WHERE id = $1',
+        [row.id]
+      );
+      
+      return {
+        id: row.id,
+        key: row.key,
+        userId: row.user_id,
+        organization: row.organization,
+        permissions: row.permissions,
+        tier: row.tier,
+        dailyQuota: row.daily_quota,
+        monthlyQuota: row.monthly_quota,
+        rateLimit: row.rate_limit,
+        isActive: row.is_active,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+        lastUsedAt: row.last_used_at
+      };
+    } catch (error) {
+      this.logger.error('Failed to validate API key:', error);
+      throw error;
+    }
+  }
+
+  async getApiKeyUsage(apiKeyId: string): Promise<{ daily: number; monthly: number }> {
+    try {
+      const now = new Date();
+      const today = now.toISOString().split('T')[0];
+      const thisMonth = now.toISOString().substring(0, 7);
+      
+      const result = await this.pool.query(
+        `SELECT 
+           COALESCE(SUM(CASE WHEN usage_date = $2 THEN daily_usage ELSE 0 END), 0) as daily_usage,
+           COALESCE(SUM(CASE WHEN usage_month = $3 THEN monthly_usage ELSE 0 END), 0) as monthly_usage
+         FROM api_key_usage 
+         WHERE api_key_id = $1`,
+        [apiKeyId, today, thisMonth]
+      );
+      
+      return {
+        daily: parseInt(result.rows[0]?.daily_usage || '0'),
+        monthly: parseInt(result.rows[0]?.monthly_usage || '0')
+      };
+    } catch (error) {
+      this.logger.error('Failed to get API key usage:', error);
+      throw error;
+    }
+  }
+
+  async incrementApiKeyUsage(apiKeyId: string): Promise<void> {
+    try {
+      const now = new Date();
+      const today = now.toISOString().split('T')[0];
+      const thisMonth = now.toISOString().substring(0, 7);
+      
+      await this.pool.query(
+        `INSERT INTO api_key_usage (api_key_id, usage_date, usage_month, daily_usage, monthly_usage)
+         VALUES ($1, $2, $3, 1, 1)
+         ON CONFLICT (api_key_id, usage_date, usage_month)
+         DO UPDATE SET 
+           daily_usage = api_key_usage.daily_usage + 1,
+           monthly_usage = api_key_usage.monthly_usage + 1`,
+        [apiKeyId, today, thisMonth]
+      );
+    } catch (error) {
+      this.logger.error('Failed to increment API key usage:', error);
+      throw error;
+    }
+  }
+
   private async createTables(): Promise<void> {
     const client = await this.pool.connect();
     
@@ -368,6 +519,53 @@ export class DatabaseService {
         )
       `);
       
+      // Create users table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          email VARCHAR(255) UNIQUE NOT NULL,
+          organization VARCHAR(255) NOT NULL,
+          tier VARCHAR(50) DEFAULT 'free',
+          is_active BOOLEAN DEFAULT true,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      
+      // Create api_keys table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          key VARCHAR(255) UNIQUE NOT NULL,
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name VARCHAR(255) NOT NULL,
+          permissions TEXT[] DEFAULT '{"read"}',
+          tier VARCHAR(50) DEFAULT 'free',
+          daily_quota INTEGER DEFAULT 1000,
+          monthly_quota INTEGER DEFAULT 30000,
+          rate_limit INTEGER DEFAULT 100,
+          is_active BOOLEAN DEFAULT true,
+          expires_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          last_used_at TIMESTAMPTZ
+        )
+      `);
+      
+      // Create api_key_usage table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS api_key_usage (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          api_key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+          usage_date DATE NOT NULL,
+          usage_month VARCHAR(7) NOT NULL,
+          daily_usage INTEGER DEFAULT 0,
+          monthly_usage INTEGER DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(api_key_id, usage_date, usage_month)
+        )
+      `);
+      
       // Create indexes
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding 
@@ -383,6 +581,31 @@ export class DatabaseService {
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_verification_requests_status 
         ON verification_requests (status)
+      `);
+      
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_api_keys_key 
+        ON api_keys (key)
+      `);
+      
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_api_keys_user_id 
+        ON api_keys (user_id)
+      `);
+      
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_api_key_usage_api_key_id 
+        ON api_key_usage (api_key_id)
+      `);
+      
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_api_key_usage_date 
+        ON api_key_usage (usage_date)
+      `);
+      
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_users_email 
+        ON users (email)
       `);
       
       await client.query('COMMIT');

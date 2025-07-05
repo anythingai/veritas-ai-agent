@@ -47,7 +47,7 @@ const Popup: React.FC = () => {
   
   const [config, setConfig] = useState<ExtensionConfig>({
     enabled: true,
-    apiEndpoint: 'https://api.veritas.ai/verify',
+    apiEndpoint: process.env.VERITAS_API_ENDPOINT || 'https://api.veritas.ai/verify',
     confidenceThreshold: 0.8,
     showTooltips: true,
     autoVerify: true

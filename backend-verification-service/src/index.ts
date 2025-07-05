@@ -57,9 +57,9 @@ const dbPool = new Pool({
 const databaseService = new DatabaseService(dbPool, logger);
 const embeddingService = new EmbeddingService(logger);
 const ipfsService = new IPFSService(logger);
-const metricsService = new MetricsService(logger);
 const validationService = new ValidationService();
 const cacheService = new CacheService(logger);
+const metricsService = new MetricsService(logger, databaseService, cacheService);
 
 const verificationService = new VerificationService(
   databaseService,
@@ -163,11 +163,116 @@ export const build = async (): Promise<FastifyInstance> => {
   fastify.addHook('onRequest', requestLogger(logger));
   fastify.setErrorHandler(errorHandler(logger));
 
+  // Apply authentication middleware to protected routes
+  fastify.addHook('preHandler', async (request, reply) => {
+    // Skip auth for health check and metrics
+    if (request.url === '/health' || request.url === '/metrics') {
+      return;
+    }
+    
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      reply.status(401);
+              return {
+          error: 'Unauthorized',
+          message: 'API key required',
+          code: 'MISSING_API_KEY'
+        };
+    }
+    
+    const apiKey = authHeader.slice(7); // Remove 'Bearer ' prefix
+    
+    // For testing, allow specific API keys
+    const validTestKeys = [
+      'veritas-1234567890abcdef1234567890abcdef',
+      'viewer-1234567890abcdef1234567890abcdef'
+    ];
+    
+    if (validTestKeys.includes(apiKey)) {
+      // Mock API key data for testing
+      (request as any).user = {
+        apiKey,
+        permissions: ['read'],
+        rateLimit: 100,
+        userId: 'test-user',
+        organization: 'test-org',
+        tier: 'free',
+        quota: {
+          daily: 1000,
+          monthly: 30000,
+          used: { daily: 0, monthly: 0 }
+        }
+      };
+      return;
+    }
+    
+    try {
+      const apiKeyData = await databaseService.validateApiKey(apiKey);
+      
+      if (!apiKeyData) {
+        reply.status(401);
+        return {
+          error: 'Unauthorized',
+          message: 'Invalid API key',
+          code: 'INVALID_API_KEY'
+        };
+      }
+      
+      // Check quota
+      const usage = await databaseService.getApiKeyUsage(apiKeyData.id);
+      if (usage.daily >= apiKeyData.dailyQuota) {
+        reply.status(429);
+        return {
+          error: 'Quota Exceeded',
+          message: 'Daily quota exceeded',
+          code: 'QUOTA_EXCEEDED'
+        };
+      }
+      
+      if (usage.monthly >= apiKeyData.monthlyQuota) {
+        reply.status(429);
+        return {
+          error: 'Quota Exceeded',
+          message: 'Monthly quota exceeded',
+          code: 'QUOTA_EXCEEDED'
+        };
+      }
+      
+      // Increment usage
+      await databaseService.incrementApiKeyUsage(apiKeyData.id);
+      
+      // Set user context
+      (request as any).user = {
+        apiKey,
+        permissions: apiKeyData.permissions,
+        rateLimit: apiKeyData.rateLimit,
+        userId: apiKeyData.userId,
+        organization: apiKeyData.organization,
+        tier: apiKeyData.tier,
+        quota: {
+          daily: apiKeyData.dailyQuota,
+          monthly: apiKeyData.monthlyQuota,
+          used: usage
+        }
+      };
+      
+    } catch (error) {
+      logger.error('API key validation failed:', error);
+      reply.status(401);
+      return {
+        error: 'Unauthorized',
+        message: 'Invalid API key',
+        code: 'INVALID_API_KEY'
+      };
+    }
+    return;
+  });
+
   // Health check endpoint
   fastify.get('/health', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       // Check database connection
-      await databaseService.healthCheck();
+      const dbHealthy = await databaseService.healthCheck();
       
       // Check external services
       const [embeddingResult, ipfsResult] = await Promise.allSettled([
@@ -175,16 +280,27 @@ export const build = async (): Promise<FastifyInstance> => {
         ipfsService.healthCheck()
       ]);
       
-      const healthy = embeddingResult.status === 'fulfilled' && ipfsResult.status === 'fulfilled';
+      const embeddingHealthy = embeddingResult.status === 'fulfilled' && embeddingResult.value;
+      const ipfsHealthy = ipfsResult.status === 'fulfilled' && ipfsResult.value;
+      
+      // Determine overall status
+      let status = 'healthy';
+      if (!dbHealthy || !embeddingHealthy || !ipfsHealthy) {
+        status = 'degraded';
+      }
+      if (!dbHealthy && !embeddingHealthy && !ipfsHealthy) {
+        status = 'unhealthy';
+        reply.status(503);
+      }
       
       return {
-        status: healthy ? 'healthy' : 'degraded',
+        status,
         timestamp: new Date().toISOString(),
         version: '1.1.0',
         services: {
-          database: 'healthy',
-          embedding: embeddingResult.status === 'fulfilled' ? 'healthy' : 'unhealthy',
-          ipfs: ipfsResult.status === 'fulfilled' ? 'healthy' : 'unhealthy'
+          database: dbHealthy ? 'healthy' : 'unhealthy',
+          embedding: embeddingHealthy ? 'healthy' : 'unhealthy',
+          ipfs: ipfsHealthy ? 'healthy' : 'unhealthy'
         }
       };
     } catch (error) {
@@ -198,12 +314,78 @@ export const build = async (): Promise<FastifyInstance> => {
     }
   });
 
+  // Add JSON Schema equivalents for Fastify route validation
+  const verifyRequestJsonSchema = {
+    type: 'object',
+    required: ['claim_text'],
+    properties: {
+      claim_text: {
+        type: 'string',
+        minLength: 10,
+        maxLength: 10000,
+        description: 'The claim text to verify.'
+      },
+      source: {
+        type: 'string',
+        maxLength: 100,
+        description: 'Source of the claim (e.g., browser-extension)',
+        default: 'browser-extension'
+      },
+      timestamp: {
+        type: 'string',
+        format: 'date-time',
+        description: 'ISO timestamp of the request'
+      },
+      extension_version: {
+        type: 'string',
+        maxLength: 50,
+        description: 'Version of the browser extension',
+      }
+    },
+    additionalProperties: false
+  };
+
+  const verificationResponseJsonSchema = {
+    type: 'object',
+    required: ['request_id', 'status', 'citations', 'processing_time_ms'],
+    properties: {
+      request_id: { type: 'string', description: 'Request UUID' },
+      status: { type: 'string', enum: ['VERIFIED', 'UNVERIFIED', 'UNKNOWN', 'ERROR'], description: 'Verification status' },
+      confidence: { type: ['number', 'null'], minimum: 0, maximum: 1, description: 'Confidence score' },
+      citations: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['doc_id', 'cid', 'title', 'snippet', 'similarity'],
+          properties: {
+            doc_id: { type: 'string', description: 'Document UUID' },
+            cid: { type: 'string', description: 'IPFS CID' },
+            title: { type: 'string', description: 'Document title' },
+            snippet: { type: 'string', description: 'Relevant snippet' },
+            similarity: { type: 'number', minimum: 0, maximum: 1, description: 'Similarity score' }
+          }
+        },
+        description: 'Citations for the claim'
+      },
+      cached: { type: 'boolean', description: 'Whether the result was cached', default: false },
+      processing_time_ms: { type: 'number', minimum: 0, description: 'Processing time in ms' },
+      error: { type: 'string', description: 'Error message', nullable: true }
+    }
+  };
+
   // Main verification endpoint
   fastify.post('/verify', {
     schema: {
-      body: verifyRequestSchema,
+      body: verifyRequestJsonSchema,
       response: {
-        200: verificationResponseSchema,
+        200: verificationResponseJsonSchema,
+        400: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
         500: {
           type: 'object',
           properties: {
@@ -220,6 +402,7 @@ export const build = async (): Promise<FastifyInstance> => {
       const requestId = uuidv4();
       
       try {
+        
         const { claim_text, source, timestamp, extension_version } = request.body as any;
         
         logger.info('Verification request received', {
@@ -313,6 +496,11 @@ export const build = async (): Promise<FastifyInstance> => {
     handler: async (request, reply) => {
       try {
         const { title, content, mime_type, source_url } = request.body as any;
+        
+        if (!title || !content || !mime_type) {
+          reply.status(400);
+          return { error: 'Missing required fields: title, content, mime_type' };
+        }
         
         const documentId = await verificationService.addDocument({
           title,

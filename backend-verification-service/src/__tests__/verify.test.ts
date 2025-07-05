@@ -423,7 +423,7 @@ describe('Veritas Verification Service - Comprehensive Tests', () => {
 
       expect(response.statusCode).toBe(400);
       const result = JSON.parse(response.payload);
-      expect(result.error).toBe('Invalid claim text provided');
+      expect(result.error).toBe('Bad Request');
     });
 
     it('should handle database errors gracefully', async () => {

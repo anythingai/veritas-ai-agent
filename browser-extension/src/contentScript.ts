@@ -22,7 +22,7 @@ export class VeritasContentScript {
   private verificationQueue: Map<string, ClaimData> = new Map();
   private processingQueue = false;
   private config = {
-    apiEndpoint: 'https://api.veritas.ai/verify',
+    apiEndpoint: process.env.VERITAS_API_ENDPOINT || 'https://api.veritas.ai/verify',
     maxRetries: 3,
     retryDelay: 1000,
     batchSize: 5,
