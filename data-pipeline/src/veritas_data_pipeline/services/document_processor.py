@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 import structlog
 import aiofiles
 import docx
-import PyPDF2
+import pypdf
 from bs4 import BeautifulSoup
 
 logger = structlog.get_logger()
@@ -60,11 +60,11 @@ class DocumentProcessor:
             raise
     
     async def _process_pdf(self, file_path: str) -> str:
-        """Process PDF document using PyPDF2"""
+        """Process PDF document using pypdf"""
         try:
             text_content = []
             with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
+                pdf_reader = pypdf.PdfReader(file)
                 for page in pdf_reader.pages:
                     text_content.append(page.extract_text())
             return '\n'.join(text_content)
@@ -173,7 +173,7 @@ class DocumentProcessor:
             if mime_type == 'application/pdf':
                 try:
                     with open(file_path, 'rb') as file:
-                        pdf_reader = PyPDF2.PdfReader(file)
+                        pdf_reader = pypdf.PdfReader(file)
                         if pdf_reader.metadata:
                             metadata.update({
                                 'title': pdf_reader.metadata.get('/Title', ''),

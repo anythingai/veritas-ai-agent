@@ -203,7 +203,16 @@ export const build = async (): Promise<FastifyInstance> => {
     schema: {
       body: verifyRequestSchema,
       response: {
-        200: verificationResponseSchema
+        200: verificationResponseSchema,
+        500: {
+          type: 'object',
+          properties: {
+            request_id: { type: 'string' },
+            status: { type: 'string' },
+            error: { type: 'string' },
+            processing_time_ms: { type: 'number' }
+          }
+        }
       }
     },
     handler: async (request, reply) => {
