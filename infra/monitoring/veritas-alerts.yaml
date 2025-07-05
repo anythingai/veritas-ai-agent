@@ -1,0 +1,343 @@
+# Veritas AI Agent - Monitoring and Alerting Configuration
+# Prometheus AlertManager rules for production monitoring
+
+groups:
+  - name: veritas-backend-alerts
+    rules:
+      # High error rate alert
+      - alert: HighErrorRate
+        expr: rate(veritas_errors_total[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: "High error rate detected in Veritas backend"
+          description: "Error rate is {{ $value }} errors per second over the last 5 minutes"
+          runbook_url: "https://veritas.ai/runbook/high-error-rate"
+
+      # High latency alert
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(veritas_verification_request_duration_seconds_bucket[5m])) > 0.3
+        for: 3m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "High latency detected in verification requests"
+          description: "P95 latency is {{ $value }}s, exceeding 300ms threshold"
+          runbook_url: "https://veritas.ai/runbook/high-latency"
+
+      # Service down alert
+      - alert: BackendServiceDown
+        expr: up{job="veritas-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: "Veritas backend service is down"
+          description: "Backend service has been down for more than 1 minute"
+          runbook_url: "https://veritas.ai/runbook/service-down"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "High memory usage on backend node"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+          runbook_url: "https://veritas.ai/runbook/high-memory"
+
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "High CPU usage on backend node"
+          description: "CPU usage is {{ $value }}%"
+          runbook_url: "https://veritas.ai/runbook/high-cpu"
+
+  - name: veritas-data-pipeline-alerts
+    rules:
+      # Data pipeline service down
+      - alert: DataPipelineServiceDown
+        expr: up{job="veritas-data-pipeline"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: data-pipeline
+        annotations:
+          summary: "Veritas data pipeline service is down"
+          description: "Data pipeline service has been down for more than 1 minute"
+          runbook_url: "https://veritas.ai/runbook/data-pipeline-down"
+
+      # Document processing failures
+      - alert: DocumentProcessingFailures
+        expr: rate(veritas_document_processing_total{status="FAILED"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          service: data-pipeline
+        annotations:
+          summary: "High document processing failure rate"
+          description: "Document processing failure rate is {{ $value }} failures per second"
+          runbook_url: "https://veritas.ai/runbook/document-processing-failures"
+
+      # Embedding generation failures
+      - alert: EmbeddingGenerationFailures
+        expr: rate(veritas_embedding_generation_total[5m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: data-pipeline
+        annotations:
+          summary: "No embedding generation activity"
+          description: "No embeddings have been generated in the last 10 minutes"
+          runbook_url: "https://veritas.ai/runbook/embedding-failures"
+
+      # IPFS operation failures
+      - alert: IPFSOperationFailures
+        expr: rate(veritas_ipfs_operations_total{status="FAILED"}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          service: data-pipeline
+        annotations:
+          summary: "High IPFS operation failure rate"
+          description: "IPFS operation failure rate is {{ $value }} failures per second"
+          runbook_url: "https://veritas.ai/runbook/ipfs-failures"
+
+  - name: veritas-database-alerts
+    rules:
+      # Database connection failures
+      - alert: DatabaseConnectionFailures
+        expr: rate(veritas_database_operations_total{status="FAILED"}[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Database connection failures detected"
+          description: "Database operation failure rate is {{ $value }} failures per second"
+          runbook_url: "https://veritas.ai/runbook/database-failures"
+
+      # Database high latency
+      - alert: DatabaseHighLatency
+        expr: histogram_quantile(0.95, rate(veritas_database_operation_duration_seconds_bucket[5m])) > 1
+        for: 3m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database operation latency"
+          description: "P95 database operation latency is {{ $value }}s"
+          runbook_url: "https://veritas.ai/runbook/database-latency"
+
+      # Database disk space
+      - alert: DatabaseDiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/var/lib/postgresql"} / node_filesystem_size_bytes{mountpoint="/var/lib/postgresql"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Database disk space is running low"
+          description: "Only {{ $value | humanizePercentage }} disk space remaining"
+          runbook_url: "https://veritas.ai/runbook/database-disk-space"
+
+  - name: veritas-extension-alerts
+    rules:
+      # Extension error rate
+      - alert: ExtensionErrorRate
+        expr: rate(veritas_extension_errors_total[5m]) > 0.001
+        for: 5m
+        labels:
+          severity: warning
+          service: extension
+        annotations:
+          summary: "High browser extension error rate"
+          description: "Extension error rate is {{ $value }} errors per second"
+          runbook_url: "https://veritas.ai/runbook/extension-errors"
+
+      # Extension verification failures
+      - alert: ExtensionVerificationFailures
+        expr: rate(veritas_verification_requests_total{status="FAILED", source="browser-extension"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          service: extension
+        annotations:
+          summary: "High verification failure rate from browser extension"
+          description: "Extension verification failure rate is {{ $value }} failures per second"
+          runbook_url: "https://veritas.ai/runbook/extension-verification-failures"
+
+  - name: veritas-business-alerts
+    rules:
+      # Low verification success rate
+      - alert: LowVerificationSuccessRate
+        expr: (rate(veritas_verification_requests_total{status="VERIFIED"}[5m]) / rate(veritas_verification_requests_total[5m])) < 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "Low verification success rate"
+          description: "Verification success rate is {{ $value | humanizePercentage }}"
+          runbook_url: "https://veritas.ai/runbook/low-success-rate"
+
+      # No verification activity
+      - alert: NoVerificationActivity
+        expr: rate(veritas_verification_requests_total[5m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "No verification activity detected"
+          description: "No verification requests have been processed in the last 15 minutes"
+          runbook_url: "https://veritas.ai/runbook/no-activity"
+
+      # High unknown verification rate
+      - alert: HighUnknownVerificationRate
+        expr: (rate(veritas_verification_requests_total{status="UNKNOWN"}[5m]) / rate(veritas_verification_requests_total[5m])) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "High rate of unknown verification results"
+          description: "Unknown verification rate is {{ $value | humanizePercentage }}"
+          runbook_url: "https://veritas.ai/runbook/high-unknown-rate"
+
+  - name: veritas-infrastructure-alerts
+    rules:
+      # Node down
+      - alert: NodeDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Node {{ $labels.instance }} is down"
+          description: "Node has been down for more than 1 minute"
+          runbook_url: "https://veritas.ai/runbook/node-down"
+
+      # Disk space low
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "Disk space is running low on {{ $labels.instance }}"
+          description: "Only {{ $value | humanizePercentage }} disk space remaining"
+          runbook_url: "https://veritas.ai/runbook/disk-space"
+
+      # High load average
+      - alert: HighLoadAverage
+        expr: node_load1 > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High load average on {{ $labels.instance }}"
+          description: "Load average is {{ $value }}"
+          runbook_url: "https://veritas.ai/runbook/high-load"
+
+      # Network interface down
+      - alert: NetworkInterfaceDown
+        expr: node_network_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Network interface down on {{ $labels.instance }}"
+          description: "Network interface {{ $labels.device }} is down"
+          runbook_url: "https://veritas.ai/runbook/network-down"
+
+  - name: veritas-security-alerts
+    rules:
+      # Unusual API access patterns
+      - alert: UnusualAPIAccess
+        expr: rate(http_requests_total{status=~"4..|5.."}[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "Unusual API access patterns detected"
+          description: "High rate of HTTP error responses: {{ $value }} errors per second"
+          runbook_url: "https://veritas.ai/runbook/unusual-api-access"
+
+      # Authentication failures
+      - alert: AuthenticationFailures
+        expr: rate(veritas_auth_failures_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "High authentication failure rate"
+          description: "Authentication failure rate is {{ $value }} failures per second"
+          runbook_url: "https://veritas.ai/runbook/auth-failures"
+
+      # Rate limiting triggered
+      - alert: RateLimitingTriggered
+        expr: rate(veritas_rate_limit_exceeded_total[5m]) > 0.5
+        for: 1m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "Rate limiting frequently triggered"
+          description: "Rate limiting triggered {{ $value }} times per second"
+          runbook_url: "https://veritas.ai/runbook/rate-limiting"
+
+  - name: veritas-backup-alerts
+    rules:
+      # Backup failures
+      - alert: BackupFailure
+        expr: veritas_backup_last_success_timestamp < (time() - 86400)
+        for: 1h
+        labels:
+          severity: critical
+          service: backup
+        annotations:
+          summary: "Backup has not completed successfully in 24 hours"
+          description: "Last successful backup was {{ $value | humanizeDuration }} ago"
+          runbook_url: "https://veritas.ai/runbook/backup-failure"
+
+      # Backup size anomaly
+      - alert: BackupSizeAnomaly
+        expr: abs(veritas_backup_size_bytes - avg_over_time(veritas_backup_size_bytes[7d])) > 2 * stddev_over_time(veritas_backup_size_bytes[7d])
+        for: 1h
+        labels:
+          severity: warning
+          service: backup
+        annotations:
+          summary: "Backup size is significantly different from normal"
+          description: "Backup size is {{ $value | humanize }} bytes"
+          runbook_url: "https://veritas.ai/runbook/backup-size-anomaly"
+
+      # Backup duration too long
+      - alert: BackupDurationTooLong
+        expr: veritas_backup_duration_seconds > 3600
+        for: 1h
+        labels:
+          severity: warning
+          service: backup
+        annotations:
+          summary: "Backup is taking longer than expected"
+          description: "Backup has been running for {{ $value | humanizeDuration }}"
+          runbook_url: "https://veritas.ai/runbook/backup-duration" 

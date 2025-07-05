@@ -1,0 +1,247 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: veritas-backend-network-policy
+  namespace: veritas
+spec:
+  podSelector:
+    matchLabels:
+      app: veritas-backend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow health checks from kubelet
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 8080
+      endPort: 8080
+  # Allow metrics scraping from Prometheus
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8080
+      endPort: 8080
+  # Allow internal service communication
+  - from:
+    - podSelector:
+        matchLabels:
+          app: veritas-data-pipeline
+    ports:
+    - protocol: TCP
+      port: 8080
+      endPort: 8080
+  egress:
+  # Allow database connections
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: veritas
+    ports:
+    - protocol: TCP
+      port: 5432
+      endPort: 5432
+  # Allow Redis connections
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: veritas
+    ports:
+    - protocol: TCP
+      port: 6379
+      endPort: 6379
+  # Allow external API calls (OpenAI, IPFS)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+      endPort: 443
+    - protocol: TCP
+      port: 80
+      endPort: 80
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+      endPort: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: veritas-data-pipeline-network-policy
+  namespace: veritas
+spec:
+  podSelector:
+    matchLabels:
+      app: veritas-data-pipeline
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow health checks from kubelet
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 8000
+      endPort: 8000
+  # Allow metrics scraping from Prometheus
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8000
+      endPort: 8000
+  egress:
+  # Allow database connections
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: veritas
+    ports:
+    - protocol: TCP
+      port: 5432
+      endPort: 5432
+  # Allow Redis connections
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: veritas
+    ports:
+    - protocol: TCP
+      port: 6379
+      endPort: 6379
+  # Allow external API calls
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+      endPort: 443
+    - protocol: TCP
+      port: 80
+      endPort: 80
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+      endPort: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: veritas-database-network-policy
+  namespace: veritas
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from Veritas services
+  - from:
+    - podSelector:
+        matchLabels:
+          app: veritas-backend
+    ports:
+    - protocol: TCP
+      port: 5432
+      endPort: 5432
+  - from:
+    - podSelector:
+        matchLabels:
+          app: veritas-data-pipeline
+    ports:
+    - protocol: TCP
+      port: 5432
+      endPort: 5432
+  # Allow metrics scraping
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9187
+      endPort: 9187
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+      endPort: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: veritas-redis-network-policy
+  namespace: veritas
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from Veritas services
+  - from:
+    - podSelector:
+        matchLabels:
+          app: veritas-backend
+    ports:
+    - protocol: TCP
+      port: 6379
+      endPort: 6379
+  - from:
+    - podSelector:
+        matchLabels:
+          app: veritas-data-pipeline
+    ports:
+    - protocol: TCP
+      port: 6379
+      endPort: 6379
+  # Allow metrics scraping
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9121
+      endPort: 9121
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+      endPort: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: veritas-default-deny
+  namespace: veritas
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress: []
+  egress: [] 

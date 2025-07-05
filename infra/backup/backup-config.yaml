@@ -1,0 +1,314 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: veritas-backup-config
+  namespace: veritas
+data:
+  # Database backup configuration
+  database-backup.yaml: |
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: veritas-database-backup
+      namespace: veritas
+    spec:
+      schedule: "0 2 * * *"  # Daily at 2 AM
+      concurrencyPolicy: Forbid
+      successfulJobsHistoryLimit: 7
+      failedJobsHistoryLimit: 3
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              serviceAccountName: veritas-backup-sa
+              restartPolicy: OnFailure
+              containers:
+              - name: backup
+                image: postgres:15
+                env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: veritas-backend-secrets
+                      key: DATABASE_PASSWORD
+                - name: PGHOST
+                  value: "veritas-postgres-prod-veritas-project"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  value: "veritas"
+                - name: PGDATABASE
+                  value: "veritas"
+                command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  BACKUP_FILE="veritas-backup-$(date +%Y%m%d-%H%M%S).sql"
+                  pg_dump -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE --verbose --clean --if-exists > /backup/$BACKUP_FILE
+                  gzip /backup/$BACKUP_FILE
+                  gsutil cp /backup/$BACKUP_FILE.gz gs://veritas-backups/database/
+                  echo "Backup completed: $BACKUP_FILE.gz"
+                volumeMounts:
+                - name: backup-volume
+                  mountPath: /backup
+              volumes:
+              - name: backup-volume
+                emptyDir: {}
+---
+  # Vector database backup configuration
+  vector-backup.yaml: |
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: veritas-vector-backup
+      namespace: veritas
+    spec:
+      schedule: "0 3 * * *"  # Daily at 3 AM
+      concurrencyPolicy: Forbid
+      successfulJobsHistoryLimit: 7
+      failedJobsHistoryLimit: 3
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              serviceAccountName: veritas-backup-sa
+              restartPolicy: OnFailure
+              containers:
+              - name: vector-backup
+                image: postgres:15
+                env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: veritas-backend-secrets
+                      key: DATABASE_PASSWORD
+                - name: PGHOST
+                  value: "veritas-postgres-prod-veritas-project"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  value: "veritas"
+                - name: PGDATABASE
+                  value: "veritas"
+                command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  BACKUP_FILE="veritas-vectors-$(date +%Y%m%d-%H%M%S).sql"
+                  pg_dump -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE --verbose --clean --if-exists --table=document_embeddings > /backup/$BACKUP_FILE
+                  gzip /backup/$BACKUP_FILE
+                  gsutil cp /backup/$BACKUP_FILE.gz gs://veritas-backups/vectors/
+                  echo "Vector backup completed: $BACKUP_FILE.gz"
+                volumeMounts:
+                - name: backup-volume
+                  mountPath: /backup
+              volumes:
+              - name: backup-volume
+                emptyDir: {}
+---
+  # IPFS backup configuration
+  ipfs-backup.yaml: |
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: veritas-ipfs-backup
+      namespace: veritas
+    spec:
+      schedule: "0 4 * * *"  # Daily at 4 AM
+      concurrencyPolicy: Forbid
+      successfulJobsHistoryLimit: 7
+      failedJobsHistoryLimit: 3
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              serviceAccountName: veritas-backup-sa
+              restartPolicy: OnFailure
+              containers:
+              - name: ipfs-backup
+                image: gcr.io/veritas-project/veritas-backend:latest
+                env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: veritas-backend-secrets
+                      key: DATABASE_URL
+                command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  BACKUP_FILE="veritas-ipfs-cids-$(date +%Y%m%d-%H%M%S).json"
+                  # Export IPFS CIDs from database
+                  psql $DATABASE_URL -c "COPY (SELECT cid, title, created_at FROM source_documents) TO STDOUT WITH CSV" > /backup/$BACKUP_FILE
+                  gzip /backup/$BACKUP_FILE
+                  gsutil cp /backup/$BACKUP_FILE.gz gs://veritas-backups/ipfs/
+                  echo "IPFS backup completed: $BACKUP_FILE.gz"
+                volumeMounts:
+                - name: backup-volume
+                  mountPath: /backup
+              volumes:
+              - name: backup-volume
+                emptyDir: {}
+---
+  # Configuration backup
+  config-backup.yaml: |
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: veritas-config-backup
+      namespace: veritas
+    spec:
+      schedule: "0 5 * * *"  # Daily at 5 AM
+      concurrencyPolicy: Forbid
+      successfulJobsHistoryLimit: 7
+      failedJobsHistoryLimit: 3
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              serviceAccountName: veritas-backup-sa
+              restartPolicy: OnFailure
+              containers:
+              - name: config-backup
+                image: bitnami/kubectl:latest
+                command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  BACKUP_DIR="veritas-config-$(date +%Y%m%d-%H%M%S)"
+                  mkdir -p /backup/$BACKUP_DIR
+                  
+                  # Backup Kubernetes resources
+                  kubectl get all -n veritas -o yaml > /backup/$BACKUP_DIR/resources.yaml
+                  kubectl get configmap -n veritas -o yaml > /backup/$BACKUP_DIR/configmaps.yaml
+                  kubectl get secret -n veritas -o yaml > /backup/$BACKUP_DIR/secrets.yaml
+                  kubectl get networkpolicy -n veritas -o yaml > /backup/$BACKUP_DIR/network-policies.yaml
+                  
+                  # Create archive
+                  cd /backup
+                  tar -czf $BACKUP_DIR.tar.gz $BACKUP_DIR
+                  gsutil cp $BACKUP_DIR.tar.gz gs://veritas-backups/config/
+                  echo "Config backup completed: $BACKUP_DIR.tar.gz"
+                volumeMounts:
+                - name: backup-volume
+                  mountPath: /backup
+                - name: kubeconfig
+                  mountPath: /root/.kube
+              volumes:
+              - name: backup-volume
+                emptyDir: {}
+              - name: kubeconfig
+                secret:
+                  secretName: kubeconfig
+---
+  # Backup retention policy
+  retention-policy.yaml: |
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: veritas-backup-cleanup
+      namespace: veritas
+    spec:
+      schedule: "0 6 * * 0"  # Weekly on Sunday at 6 AM
+      concurrencyPolicy: Forbid
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              serviceAccountName: veritas-backup-sa
+              restartPolicy: OnFailure
+              containers:
+              - name: cleanup
+                image: google/cloud-sdk:latest
+                command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  
+                  # Keep daily backups for 7 days
+                  gsutil ls gs://veritas-backups/database/ | head -n -7 | xargs -r gsutil rm
+                  gsutil ls gs://veritas-backups/vectors/ | head -n -7 | xargs -r gsutil rm
+                  gsutil ls gs://veritas-backups/ipfs/ | head -n -7 | xargs -r gsutil rm
+                  gsutil ls gs://veritas-backups/config/ | head -n -7 | xargs -r gsutil rm
+                  
+                  # Keep weekly backups for 4 weeks
+                  gsutil ls gs://veritas-backups/weekly/ | head -n -4 | xargs -r gsutil rm
+                  
+                  # Keep monthly backups for 12 months
+                  gsutil ls gs://veritas-backups/monthly/ | head -n -12 | xargs -r gsutil rm
+                  
+                  echo "Backup cleanup completed"
+---
+  # Disaster recovery script
+  disaster-recovery.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Starting Veritas disaster recovery..."
+    
+    # Check if we're in recovery mode
+    if [ "$RECOVERY_MODE" != "true" ]; then
+      echo "Error: RECOVERY_MODE must be set to 'true'"
+      exit 1
+    fi
+    
+    # Restore database
+    echo "Restoring database..."
+    LATEST_DB_BACKUP=$(gsutil ls gs://veritas-backups/database/ | tail -1)
+    gsutil cp $LATEST_DB_BACKUP /tmp/database-backup.sql.gz
+    gunzip /tmp/database-backup.sql.gz
+    
+    psql $DATABASE_URL < /tmp/database-backup.sql
+    
+    # Restore vector embeddings
+    echo "Restoring vector embeddings..."
+    LATEST_VECTOR_BACKUP=$(gsutil ls gs://veritas-backups/vectors/ | tail -1)
+    gsutil cp $LATEST_VECTOR_BACKUP /tmp/vector-backup.sql.gz
+    gunzip /tmp/vector-backup.sql.gz
+    
+    psql $DATABASE_URL < /tmp/vector-backup.sql
+    
+    # Restore IPFS CIDs
+    echo "Restoring IPFS CIDs..."
+    LATEST_IPFS_BACKUP=$(gsutil ls gs://veritas-backups/ipfs/ | tail -1)
+    gsutil cp $LATEST_IPFS_BACKUP /tmp/ipfs-backup.json.gz
+    gunzip /tmp/ipfs-backup.json.gz
+    
+    # Import IPFS CIDs back to database
+    python3 /app/scripts/restore_ipfs_cids.py /tmp/ipfs-backup.json
+    
+    # Restore configuration
+    echo "Restoring configuration..."
+    LATEST_CONFIG_BACKUP=$(gsutil ls gs://veritas-backups/config/ | tail -1)
+    gsutil cp $LATEST_CONFIG_BACKUP /tmp/config-backup.tar.gz
+    tar -xzf /tmp/config-backup.tar.gz -C /tmp
+    
+    kubectl apply -f /tmp/veritas-config-*/resources.yaml
+    kubectl apply -f /tmp/veritas-config-*/configmaps.yaml
+    kubectl apply -f /tmp/veritas-config-*/network-policies.yaml
+    
+    echo "Disaster recovery completed successfully!"
+---
+  # Backup monitoring
+  backup-monitoring.yaml: |
+    apiVersion: monitoring.coreos.com/v1
+    kind: ServiceMonitor
+    metadata:
+      name: veritas-backup-monitor
+      namespace: monitoring
+    spec:
+      selector:
+        matchLabels:
+          app: veritas-backup
+      endpoints:
+      - port: metrics
+        interval: 30s
+        path: /metrics
+      namespaceSelector:
+        matchNames:
+        - veritas 

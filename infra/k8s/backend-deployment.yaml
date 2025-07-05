@@ -1,0 +1,284 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: veritas
+  labels:
+    name: veritas
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: veritas-backend-sa
+  namespace: veritas
+  annotations:
+    iam.gke.io/gcp-service-account: veritas-gke-sa@veritas-project.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: veritas-backend-config
+  namespace: veritas
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  RATE_LIMIT_MAX: "50"
+  RATE_LIMIT_WINDOW: "1000"
+  EMBEDDING_MODEL: "text-embedding-ada-002"
+  IPFS_GATEWAY_URL: "https://ipfs.io"
+  IPFS_API_URL: "https://ipfs.infura.io:5001/api/v0"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: veritas-backend-secrets
+  namespace: veritas
+type: Opaque
+data:
+  # These should be populated from Secret Manager in production
+  DATABASE_URL: "cG9zdGdyZXNxbDovL3Zlcml0YXM6cGFzc3dvcmRAcG9zdGdyZXMtcHJvZC12ZXJpdGFzLXByb2plY3Q6NTQzMi92ZXJpdGFz"
+  REDIS_URL: "cmVkaXM6Ly9yZWRpcy1wcm9kLXZlcml0YXMtcHJvamVjdDo2Mzc5"
+  OPENAI_API_KEY: "c2stZXhhbXBsZQ=="
+  VALID_API_KEYS: "dmVyaXRhcy1hcGkta2V5LTEscmVzZWFyY2hlci1rZXktMSxkZXZlbG9wZXIta2V5LTE="
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: veritas-backend
+  namespace: veritas
+  labels:
+    app: veritas-backend
+    version: v1.1.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: veritas-backend
+  template:
+    metadata:
+      labels:
+        app: veritas-backend
+        version: v1.1.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: veritas-backend-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: veritas-backend
+        image: gcr.io/veritas-project/veritas-backend:1.1.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: NODE_ENV
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: LOG_LEVEL
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: veritas-backend-secrets
+              key: DATABASE_URL
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: veritas-backend-secrets
+              key: REDIS_URL
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: veritas-backend-secrets
+              key: OPENAI_API_KEY
+        - name: VALID_API_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: veritas-backend-secrets
+              key: VALID_API_KEYS
+        - name: RATE_LIMIT_MAX
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: RATE_LIMIT_MAX
+        - name: RATE_LIMIT_WINDOW
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: RATE_LIMIT_WINDOW
+        - name: EMBEDDING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: EMBEDDING_MODEL
+        - name: IPFS_GATEWAY_URL
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: IPFS_GATEWAY_URL
+        - name: IPFS_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: veritas-backend-config
+              key: IPFS_API_URL
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: logs
+        emptyDir: {}
+      nodeSelector:
+        dedicated: veritas
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "veritas"
+        effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: veritas-backend-service
+  namespace: veritas
+  labels:
+    app: veritas-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: veritas-backend
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: veritas-backend-ingress
+  namespace: veritas
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "veritas-ip"
+    networking.gke.io/managed-certificates: "veritas-ssl-cert"
+    networking.gke.io/v1beta1.FrontendConfig: "veritas-frontend-config"
+spec:
+  rules:
+  - host: api.veritas.ai
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: veritas-backend-service
+            port:
+              number: 80
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: veritas-frontend-config
+  namespace: veritas
+spec:
+  securityPolicy: "veritas-security-policy"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: veritas-backend-hpa
+  namespace: veritas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: veritas-backend
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: veritas-backend-pdb
+  namespace: veritas
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: veritas-backend 

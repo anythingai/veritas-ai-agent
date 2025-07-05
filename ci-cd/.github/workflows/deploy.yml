@@ -1,0 +1,250 @@
+name: Deploy to Production
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  REGISTRY: gcr.io
+  IMAGE_NAME: veritas-project
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/veritas-backend:${{ github.ref_name }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Run Snyk security scan
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+  test:
+    runs-on: ubuntu-latest
+    needs: security-scan
+    strategy:
+      matrix:
+        service: [browser-extension, backend-verification-service, data-pipeline]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      if: matrix.service != 'data-pipeline'
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'
+    
+    - name: Set up Python
+      if: matrix.service == 'data-pipeline'
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.10
+    
+    - name: Install dependencies (Node)
+      if: matrix.service != 'data-pipeline'
+      run: |
+        cd ${{ matrix.service }}
+        npm ci
+    
+    - name: Install dependencies (Python)
+      if: matrix.service == 'data-pipeline'
+      run: |
+        cd data-pipeline
+        pip install poetry
+        poetry install
+    
+    - name: Run linting
+      run: |
+        cd ${{ matrix.service }}
+        if [ -f package.json ]; then npm run lint; fi
+        if [ -f pyproject.toml ]; then poetry run flake8 src; fi
+    
+    - name: Run type checking
+      run: |
+        cd ${{ matrix.service }}
+        if [ -f package.json ]; then npm run type-check; fi
+        if [ -f pyproject.toml ]; then poetry run mypy src; fi
+    
+    - name: Run tests
+      run: |
+        cd ${{ matrix.service }}
+        if [ -f package.json ]; then npm run test:coverage; fi
+        if [ -f pyproject.toml ]; then poetry run pytest --cov=src; fi
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./${{ matrix.service }}/coverage/lcov.info
+        flags: ${{ matrix.service }}
+        name: ${{ matrix.service }}-coverage
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Google Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: _json_key
+        password: ${{ secrets.GCP_SA_KEY }}
+    
+    - name: Build and push backend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend-verification-service
+        push: true
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/veritas-backend:${{ github.ref_name }}
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/veritas-backend:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Build and push data pipeline image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./data-pipeline
+        push: true
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/veritas-data-pipeline:${{ github.ref_name }}
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/veritas-data-pipeline:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event.inputs.environment == 'staging' || github.ref == 'refs/heads/main'
+    environment: staging
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }} # <-- Ensure this secret is set in GitHub repo
+        project_id: ${{ secrets.GCP_PROJECT_ID }}   # <-- Ensure this secret is set in GitHub repo
+    
+    - name: Configure kubectl
+      run: |
+        gcloud container clusters get-credentials veritas-gke-staging --region=us-central1
+    
+    - name: Deploy to staging
+      run: |
+        # Update image tags in deployment files
+        sed -i 's|gcr.io/veritas-project/veritas-backend:.*|gcr.io/veritas-project/veritas-backend:${{ github.ref_name }}|g' infra/k8s/backend-deployment.yaml
+        sed -i 's|gcr.io/veritas-project/veritas-data-pipeline:.*|gcr.io/veritas-project/veritas-data-pipeline:${{ github.ref_name }}|g' infra/k8s/data-pipeline-deployment.yaml
+        
+        # Apply Kubernetes manifests
+        kubectl apply -f infra/k8s/ --recursive
+        
+        # Wait for deployment to be ready
+        kubectl rollout status deployment/veritas-backend -n veritas --timeout=300s
+        kubectl rollout status deployment/veritas-data-pipeline -n veritas --timeout=300s
+    
+    - name: Run smoke tests
+      run: |
+        # Wait for services to be ready
+        sleep 30
+        
+        # Test health endpoints
+        kubectl port-forward svc/veritas-backend-service 8080:80 -n veritas &
+        sleep 10
+        curl -f http://localhost:8080/health
+        pkill -f "kubectl port-forward"
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event.inputs.environment == 'production' || startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }} # <-- Ensure this secret is set in GitHub repo
+        project_id: ${{ secrets.GCP_PROJECT_ID }}   # <-- Ensure this secret is set in GitHub repo
+    
+    - name: Configure kubectl
+      run: |
+        gcloud container clusters get-credentials veritas-gke-prod --region=us-central1
+    
+    - name: Deploy to production
+      run: |
+        # Update image tags in deployment files
+        sed -i 's|gcr.io/veritas-project/veritas-backend:.*|gcr.io/veritas-project/veritas-backend:${{ github.ref_name }}|g' infra/k8s/backend-deployment.yaml
+        sed -i 's|gcr.io/veritas-project/veritas-data-pipeline:.*|gcr.io/veritas-project/veritas-data-pipeline:${{ github.ref_name }}|g' infra/k8s/data-pipeline-deployment.yaml
+        
+        # Apply Kubernetes manifests
+        kubectl apply -f infra/k8s/ --recursive
+        
+        # Wait for deployment to be ready
+        kubectl rollout status deployment/veritas-backend -n veritas --timeout=300s
+        kubectl rollout status deployment/veritas-data-pipeline -n veritas --timeout=300s
+    
+    - name: Run production tests
+      run: |
+        # Wait for services to be ready
+        sleep 60
+        
+        # Test production endpoints
+        curl -f https://api.veritas.ai/health
+        curl -f https://api.veritas.ai/metrics
+    
+    - name: Create GitHub release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    steps:
+    - name: Notify Slack
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#veritas-deployments'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} # <-- Ensure this secret is set in GitHub repo 

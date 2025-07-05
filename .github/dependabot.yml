@@ -1,0 +1,104 @@
+version: 2
+updates:
+  # Enable version updates for npm
+  - package-ecosystem: "npm"
+    directory: "/browser-extension"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "npm"
+      prefix-development: "npm-dev"
+      include: "scope"
+
+  # Enable version updates for npm
+  - package-ecosystem: "npm"
+    directory: "/backend-verification-service"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "npm"
+      prefix-development: "npm-dev"
+      include: "scope"
+
+  # Enable version updates for pip
+  - package-ecosystem: "pip"
+    directory: "/data-pipeline"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "pip"
+      prefix-development: "pip-dev"
+      include: "scope"
+
+  # Enable version updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "github-actions"
+      prefix-development: "github-actions-dev"
+      include: "scope"
+
+  # Enable version updates for Docker
+  - package-ecosystem: "docker"
+    directory: "/browser-extension"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "docker"
+      prefix-development: "docker-dev"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directory: "/backend-verification-service"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "docker"
+      prefix-development: "docker-dev"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directory: "/data-pipeline"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "anything-ai"
+    assignees:
+      - "anything-ai"
+    commit-message:
+      prefix: "docker"
+      prefix-development: "docker-dev"
+      include: "scope" 

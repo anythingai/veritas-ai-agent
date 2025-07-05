@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: veritas-data-pipeline
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/anythingai/veritas-ai-agent'
+    path: infra/k8s
+    targetRevision: HEAD
+    directory:
+      recurse: true
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: veritas
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true 

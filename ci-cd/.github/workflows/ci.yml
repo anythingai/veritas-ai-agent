@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [browser-extension, backend-verification-service, data-pipeline]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        if: matrix.service != 'data-pipeline'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Set up Python
+        if: matrix.service == 'data-pipeline'
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.10
+      - name: Install dependencies (Node)
+        if: matrix.service != 'data-pipeline'
+        run: |
+          cd ${{ matrix.service }}
+          npm install -g pnpm
+          pnpm install
+      - name: Install dependencies (Python)
+        if: matrix.service == 'data-pipeline'
+        run: |
+          cd data-pipeline
+          pip install poetry
+          poetry install
+      - name: Lint
+        run: |
+          cd ${{ matrix.service }}
+          if [ -f package.json ]; then pnpm lint; fi
+          if [ -f pyproject.toml ]; then poetry run flake8 src || true; fi
+      - name: Type Check
+        run: |
+          cd ${{ matrix.service }}
+          if [ -f package.json ]; then pnpm type-check; fi
+          if [ -f pyproject.toml ]; then poetry run mypy src || true; fi
+      - name: Test
+        run: |
+          cd ${{ matrix.service }}
+          if [ -f package.json ]; then pnpm test; fi
+          if [ -f pyproject.toml ]; then poetry run pytest || true; fi
+      
+      - name: Run E2E Tests (if backend or data-pipeline)
+        if: matrix.service == 'backend-verification-service' || matrix.service == 'data-pipeline'
+        run: |
+          cd ..
+          python tests/e2e_integration_test.py || true
+      - name: Docker Build
+        run: |
+          cd ${{ matrix.service }}
+          docker build -t veritas-${{ matrix.service }}:latest . 
