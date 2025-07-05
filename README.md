@@ -1,12 +1,5 @@
 # Veritas AI Agent
 
-[![CI](https://github.com/anything-ai/veritas-ai-agent/workflows/CI/badge.svg)](https://github.com/anything-ai/veritas-ai-agent/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/anything-ai/veritas-ai-agent/releases)
-[![Security](https://img.shields.io/badge/security-policy-brightgreen.svg)](SECURITY.md)
-[![Code Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](https://codecov.io/gh/anything-ai/veritas-ai-agent)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://hub.docker.com/r/anything-ai/veritas-ai-agent)
-
 > **Real-time trust layer for AI** - Grounding LLM output in verifiable, cryptographically-signed source documents stored on IPFS.
 
 ## 📋 Table of Contents
