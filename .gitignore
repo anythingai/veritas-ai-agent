@@ -91,7 +91,9 @@ ipython_config.py
 Pipfile.lock
 
 # poetry
-poetry.lock
+# Note: poetry.lock should typically be committed for reproducible builds
+# Uncomment the line below if you want to ignore it (not recommended for production)
+# poetry.lock
 
 # pdm
 .pdm.toml
@@ -114,6 +116,16 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Environment files - but allow template files to be committed
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Allow these environment template files to be committed
+!.env.example
+!.env.test
 
 # Spyder project settings
 .spyderproject
@@ -138,6 +150,9 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Ruff cache
+.ruff_cache/
 
 # PyCharm
 .idea/
@@ -252,12 +267,6 @@ jspm_packages/
 
 # Yarn Integrity file
 .yarn-integrity
-
-# dotenv environment variable files
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
 
 # parcel-bundler cache
 .cache
