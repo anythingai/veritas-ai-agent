@@ -54,7 +54,7 @@
     "@types/superagent": "^8.1.9",
     "@types/supertest": "^2.0.16",
     "@types/uuid": "^9.0.7",
-    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/eslint-plugin": "^8.35.1",
     "@typescript-eslint/parser": "^6.15.0",
     "@vitest/coverage-v8": "^3.2.4",
     "eslint": "^8.56.0",
