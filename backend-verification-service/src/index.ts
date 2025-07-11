@@ -18,7 +18,7 @@ import { CacheService } from './services/cache.service';
 import { verifyRequestSchema, verificationResponseSchema } from './schemas/verification.schema';
 import { errorHandler } from './middleware/error-handler';
 import { requestLogger } from './middleware/request-logger';
-import { authMiddleware } from './middleware/auth';
+import { createAuthMiddleware } from './middleware/auth';
 
 // Load environment variables
 dotenv.config();
@@ -44,35 +44,77 @@ const logger = winston.createLogger({
   ]
 });
 
-// Database connection
-const dbPool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-});
+// Interface for dependency injection
+export interface ServiceDependencies {
+  databaseService?: DatabaseService;
+  embeddingService?: EmbeddingService;
+  ipfsService?: IPFSService;
+  validationService?: ValidationService;
+  cacheService?: CacheService;
+  metricsService?: MetricsService;
+  verificationService?: VerificationService;
+  logger?: any;
+}
 
-// Initialize services
-const databaseService = new DatabaseService(dbPool, logger);
-const embeddingService = new EmbeddingService(logger);
-const ipfsService = new IPFSService(logger);
-const validationService = new ValidationService();
-const cacheService = new CacheService(logger);
-const metricsService = new MetricsService(logger, databaseService, cacheService);
+// Build function for testing with optional service injection
+export const build = async (dependencies?: ServiceDependencies): Promise<FastifyInstance> => {
+  // Use provided services or create new ones
+  let databaseService = dependencies?.databaseService;
+  let embeddingService = dependencies?.embeddingService;
+  let ipfsService = dependencies?.ipfsService;
+  let validationService = dependencies?.validationService;
+  let cacheService = dependencies?.cacheService;
+  let metricsService = dependencies?.metricsService;
+  let verificationService = dependencies?.verificationService;
+  const serviceLogger = dependencies?.logger || logger;
 
-const verificationService = new VerificationService(
-  databaseService,
-  embeddingService,
-  ipfsService,
-  metricsService,
-  validationService,
-  cacheService,
-  logger
-);
+  if (!databaseService) {
+    // Database connection
+    const dbPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+    databaseService = new DatabaseService(dbPool, serviceLogger);
+  }
 
-// Build function for testing
-export const build = async (): Promise<FastifyInstance> => {
+  if (!embeddingService) {
+    embeddingService = new EmbeddingService(serviceLogger);
+  }
+
+  if (!ipfsService) {
+    ipfsService = new IPFSService(serviceLogger);
+  }
+
+  if (!validationService) {
+    validationService = new ValidationService();
+  }
+
+  if (!cacheService) {
+    cacheService = new CacheService(serviceLogger);
+  }
+
+  if (!metricsService) {
+    metricsService = new MetricsService(serviceLogger, databaseService, cacheService);
+  }
+
+  if (!verificationService) {
+    verificationService = new VerificationService(
+      databaseService,
+      embeddingService,
+      ipfsService,
+      metricsService,
+      validationService,
+      cacheService,
+      serviceLogger
+    );
+  }
+
+  // Create authentication middleware
+  const authMiddleware = createAuthMiddleware(databaseService, serviceLogger);
+
   // Create Fastify instance
   const fastify: FastifyInstance = Fastify({
     logger: false, // We're using Winston instead
@@ -153,163 +195,59 @@ export const build = async (): Promise<FastifyInstance> => {
       reply.type('text/plain');
       return metrics;
     } catch (error) {
-      logger.error('Metrics endpoint error:', error);
+      serviceLogger.error('Metrics endpoint error:', error);
       reply.status(500);
       return 'Error collecting metrics';
     }
   });
 
   // Middleware
-  fastify.addHook('onRequest', requestLogger(logger));
-  fastify.setErrorHandler(errorHandler(logger));
+  fastify.addHook('onRequest', requestLogger(serviceLogger));
+  fastify.setErrorHandler(errorHandler(serviceLogger));
 
   // Apply authentication middleware to protected routes
   fastify.addHook('preHandler', async (request, reply) => {
-    // Skip auth for health check and metrics
-    if (request.url === '/health' || request.url === '/metrics') {
-      return;
-    }
-    
-    const authHeader = request.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      reply.status(401);
-              return {
-          error: 'Unauthorized',
-          message: 'API key required',
-          code: 'MISSING_API_KEY'
-        };
-    }
-    
-    const apiKey = authHeader.slice(7); // Remove 'Bearer ' prefix
-    
-    // For testing, allow specific API keys
-    const validTestKeys = [
-      'veritas-1234567890abcdef1234567890abcdef',
-      'viewer-1234567890abcdef1234567890abcdef'
-    ];
-    
-    if (validTestKeys.includes(apiKey)) {
-      // Mock API key data for testing
-      (request as any).user = {
-        apiKey,
-        permissions: ['read'],
-        rateLimit: 100,
-        userId: 'test-user',
-        organization: 'test-org',
-        tier: 'free',
-        quota: {
-          daily: 1000,
-          monthly: 30000,
-          used: { daily: 0, monthly: 0 }
-        }
-      };
-      return;
-    }
-    
-    try {
-      const apiKeyData = await databaseService.validateApiKey(apiKey);
-      
-      if (!apiKeyData) {
-        reply.status(401);
-        return {
-          error: 'Unauthorized',
-          message: 'Invalid API key',
-          code: 'INVALID_API_KEY'
-        };
-      }
-      
-      // Check quota
-      const usage = await databaseService.getApiKeyUsage(apiKeyData.id);
-      if (usage.daily >= apiKeyData.dailyQuota) {
-        reply.status(429);
-        return {
-          error: 'Quota Exceeded',
-          message: 'Daily quota exceeded',
-          code: 'QUOTA_EXCEEDED'
-        };
-      }
-      
-      if (usage.monthly >= apiKeyData.monthlyQuota) {
-        reply.status(429);
-        return {
-          error: 'Quota Exceeded',
-          message: 'Monthly quota exceeded',
-          code: 'QUOTA_EXCEEDED'
-        };
-      }
-      
-      // Increment usage
-      await databaseService.incrementApiKeyUsage(apiKeyData.id);
-      
-      // Set user context
-      (request as any).user = {
-        apiKey,
-        permissions: apiKeyData.permissions,
-        rateLimit: apiKeyData.rateLimit,
-        userId: apiKeyData.userId,
-        organization: apiKeyData.organization,
-        tier: apiKeyData.tier,
-        quota: {
-          daily: apiKeyData.dailyQuota,
-          monthly: apiKeyData.monthlyQuota,
-          used: usage
-        }
-      };
-      
-    } catch (error) {
-      logger.error('API key validation failed:', error);
-      reply.status(401);
-      return {
-        error: 'Unauthorized',
-        message: 'Invalid API key',
-        code: 'INVALID_API_KEY'
-      };
-    }
-    return;
+    await authMiddleware(request, reply);
   });
 
-  // Health check endpoint
+  // Health check endpoint (unauthenticated)
   fastify.get('/health', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      // Check database connection
-      const dbHealthy = await databaseService.healthCheck();
-      
-      // Check external services
-      const [embeddingResult, ipfsResult] = await Promise.allSettled([
-        embeddingService.healthCheck(),
-        ipfsService.healthCheck()
-      ]);
-      
-      const embeddingHealthy = embeddingResult.status === 'fulfilled' && embeddingResult.value;
-      const ipfsHealthy = ipfsResult.status === 'fulfilled' && ipfsResult.value;
-      
-      // Determine overall status
-      let status = 'healthy';
-      if (!dbHealthy || !embeddingHealthy || !ipfsHealthy) {
-        status = 'degraded';
-      }
-      if (!dbHealthy && !embeddingHealthy && !ipfsHealthy) {
-        status = 'unhealthy';
-        reply.status(503);
-      }
-      
-      return {
-        status,
+      // Check each service individually and handle failures gracefully
+      const checkService = async (serviceCheck: () => Promise<boolean>): Promise<string> => {
+        try {
+          const result = await serviceCheck();
+          return result ? 'healthy' : 'unhealthy';
+        } catch (error) {
+          return 'unhealthy';
+        }
+      };
+
+      const health = {
+        status: 'healthy',
         timestamp: new Date().toISOString(),
         version: '1.1.0',
         services: {
-          database: dbHealthy ? 'healthy' : 'unhealthy',
-          embedding: embeddingHealthy ? 'healthy' : 'unhealthy',
-          ipfs: ipfsHealthy ? 'healthy' : 'unhealthy'
+          database: await checkService(() => databaseService.healthCheck()),
+          embedding: await checkService(() => embeddingService.healthCheck()),
+          ipfs: await checkService(() => ipfsService.healthCheck())
         }
       };
+
+      if (Object.values(health.services).some(status => status === 'unhealthy')) {
+        health.status = 'degraded';
+        reply.status(503);
+      }
+
+      return health;
     } catch (error) {
-      logger.error('Health check failed:', error);
+      serviceLogger.error('Health check failed:', error);
       reply.status(503);
       return {
         status: 'unhealthy',
         timestamp: new Date().toISOString(),
-        error: 'Service unavailable'
+        version: '1.1.0',
+        error: error instanceof Error ? error.message : 'Unknown error'
       };
     }
   });
@@ -405,21 +343,20 @@ export const build = async (): Promise<FastifyInstance> => {
         
         const { claim_text, source, timestamp, extension_version } = request.body as any;
         
-        logger.info('Verification request received', {
+        serviceLogger.info('Verification request received', {
           requestId,
           claimLength: claim_text.length,
           source,
-          extensionVersion: extension_version
+          extensionVersion: extension_version,
+          userId: (request as any).user.userId
         });
 
         // Check cache first
-        const cacheKey = verificationService.generateCacheKey(claim_text);
-        const cachedResult = await cacheService.get(cacheKey);
-        
-        if (cachedResult) {
+        const cachedResult = await cacheService.getCachedVerificationResult(claim_text);
+        if (cachedResult && cachedResult.expiresAt > Date.now()) {
           // Add a type assertion for cachedResult
           const { status, confidence, citations } = cachedResult as { status: string; confidence: number; citations: any[] };
-          logger.info('Cache hit', { requestId, cacheKey });
+          serviceLogger.info('Cache hit', { requestId, cacheKey: claim_text });
           metricsService.recordCacheHit();
           
           return {
@@ -428,15 +365,15 @@ export const build = async (): Promise<FastifyInstance> => {
             confidence,
             citations,
             cached: true,
-            processing_time_ms: Date.now() - startTime
+            processing_time_ms: Math.max(Date.now() - startTime, 1)
           };
         }
 
         // Perform verification
         const result = await verificationService.verifyClaim(claim_text, source);
         
-        // Cache the result
-        await cacheService.set(cacheKey, result, { ttl: 300 }); // 5 minutes
+                  // Cache the result
+          await cacheService.cacheVerificationResult(claim_text, result, { ttl: 300 }); // 5 minutes
         
         // Store analytics
         await databaseService.storeVerificationRequest({
@@ -447,19 +384,25 @@ export const build = async (): Promise<FastifyInstance> => {
           doc_ids: result.citations.map(c => c.doc_id),
           source,
           extension_version,
-          processing_time_ms: Date.now() - startTime,
+          processing_time_ms: Math.max(Date.now() - startTime, 1),
           created_at: new Date()
         });
 
         // Record metrics
-        metricsService.recordVerificationRequest(result.status, Date.now() - startTime);
-        
-        logger.info('Verification completed', {
+        await metricsService.recordVerificationMetrics({
+          claimLength: claim_text.length,
+          documentsFound: result.citations.length,
+          processingTimeMs: Math.max(Date.now() - startTime, 1),
+          status: result.status,
+          confidence: result.confidence
+        });
+
+        serviceLogger.info('Verification completed', {
           requestId,
           status: result.status,
           confidence: result.confidence,
           citationsCount: result.citations.length,
-          processingTimeMs: Date.now() - startTime
+          processingTimeMs: Math.max(Date.now() - startTime, 1)
         });
 
         return {
@@ -468,14 +411,15 @@ export const build = async (): Promise<FastifyInstance> => {
           confidence: result.confidence,
           citations: result.citations,
           cached: false,
-          processing_time_ms: Date.now() - startTime
+          processing_time_ms: Math.max(Date.now() - startTime, 1)
         };
         
       } catch (error) {
-        logger.error('Verification failed', {
+        const processingTime = Math.max(Date.now() - startTime, 1);
+        serviceLogger.error('Verification failed', {
           requestId,
           error: error instanceof Error ? error.message : 'Unknown error',
-          stack: error instanceof Error ? error.stack : undefined
+          processingTime
         });
         
         metricsService.recordValidationError('verification', 'error');
@@ -484,8 +428,11 @@ export const build = async (): Promise<FastifyInstance> => {
         return {
           request_id: requestId,
           status: 'ERROR',
-          error: process.env.NODE_ENV === 'production' ? 'Internal server error' : error instanceof Error ? error.message : 'Unknown error',
-          processing_time_ms: Date.now() - startTime
+          confidence: null,
+          citations: [],
+          cached: false,
+          processing_time_ms: processingTime,
+          error: error instanceof Error ? error.message : 'Internal server error'
         };
       }
     }
@@ -511,7 +458,7 @@ export const build = async (): Promise<FastifyInstance> => {
         
         return { document_id: documentId };
       } catch (error) {
-        logger.error('Document addition failed:', error);
+        serviceLogger.error('Document addition failed:', error);
         reply.status(500);
         return { error: 'Failed to add document' };
       }
@@ -525,7 +472,7 @@ export const build = async (): Promise<FastifyInstance> => {
         const documents = await databaseService.getDocuments(page, limit);
         return documents;
       } catch (error) {
-        logger.error('Document retrieval failed:', error);
+        serviceLogger.error('Document retrieval failed:', error);
         reply.status(500);
         return { error: 'Failed to retrieve documents' };
       }
@@ -540,7 +487,7 @@ export const build = async (): Promise<FastifyInstance> => {
         const analytics = await databaseService.getVerificationAnalytics(start_date, end_date, source);
         return analytics;
       } catch (error) {
-        logger.error('Analytics retrieval failed:', error);
+        serviceLogger.error('Analytics retrieval failed:', error);
         reply.status(500);
         return { error: 'Failed to retrieve analytics' };
       }
@@ -550,14 +497,59 @@ export const build = async (): Promise<FastifyInstance> => {
   return fastify;
 };
 
+// Create default production services
+let defaultDatabaseService: DatabaseService | null = null;
+let defaultEmbeddingService: EmbeddingService | null = null;
+let defaultIPFSService: IPFSService | null = null;
+let defaultCacheService: CacheService | null = null;
+let defaultDbPool: Pool | null = null;
+
+const createDefaultServices = () => {
+  if (!defaultDbPool) {
+    defaultDbPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+  }
+
+  if (!defaultDatabaseService) {
+    defaultDatabaseService = new DatabaseService(defaultDbPool, logger);
+  }
+
+  if (!defaultEmbeddingService) {
+    defaultEmbeddingService = new EmbeddingService(logger);
+  }
+
+  if (!defaultIPFSService) {
+    defaultIPFSService = new IPFSService(logger);
+  }
+
+  if (!defaultCacheService) {
+    defaultCacheService = new CacheService(logger);
+  }
+
+  return {
+    databaseService: defaultDatabaseService,
+    embeddingService: defaultEmbeddingService,
+    ipfsService: defaultIPFSService,
+    cacheService: defaultCacheService,
+    dbPool: defaultDbPool
+  };
+};
+
 // Start server
 const start = async () => {
   try {
+    const services = createDefaultServices();
+    
     // Initialize services
-    await databaseService.initialize();
-    await embeddingService.initialize();
-    await ipfsService.initialize();
-    await cacheService.initialize();
+    await services.databaseService.initialize();
+    await services.embeddingService.initialize();
+    await services.ipfsService.initialize();
+    await services.cacheService.healthCheck();
     
     const app = await build();
     
@@ -574,14 +566,14 @@ const start = async () => {
     process.on('SIGTERM', async () => {
       logger.info('SIGTERM received, shutting down gracefully');
       await app.close();
-      await dbPool.end();
+      await services.dbPool.end();
       process.exit(0);
     });
     
     process.on('SIGINT', async () => {
       logger.info('SIGINT received, shutting down gracefully');
       await app.close();
-      await dbPool.end();
+      await services.dbPool.end();
       process.exit(0);
     });
     

@@ -385,13 +385,17 @@ export class DatabaseService {
 
   async validateApiKey(apiKey: string): Promise<ApiKey | null> {
     try {
+      // Hash the API key for lookup
+      const crypto = require('crypto');
+      const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+      
       const result = await this.pool.query(
         `SELECT ak.*, u.organization 
          FROM api_keys ak 
          JOIN users u ON ak.user_id = u.id 
-         WHERE ak.key = $1 AND ak.is_active = true 
+         WHERE ak.key_hash = $1 AND ak.is_active = true 
          AND (ak.expires_at IS NULL OR ak.expires_at > NOW())`,
-        [apiKey]
+        [keyHash]
       );
       
       if (result.rows.length === 0) {
@@ -408,7 +412,7 @@ export class DatabaseService {
       
       return {
         id: row.id,
-        key: row.key,
+        key: apiKey, // Return the original key, not the hash
         userId: row.user_id,
         organization: row.organization,
         permissions: row.permissions,
@@ -423,7 +427,7 @@ export class DatabaseService {
       };
     } catch (error) {
       this.logger.error('Failed to validate API key:', error);
-      throw error;
+      return null;
     }
   }
 
@@ -536,9 +540,9 @@ export class DatabaseService {
       await client.query(`
         CREATE TABLE IF NOT EXISTS api_keys (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          key VARCHAR(255) UNIQUE NOT NULL,
+          key_hash VARCHAR(255) UNIQUE NOT NULL,
           user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          name VARCHAR(255) NOT NULL,
+          organization VARCHAR(255) NOT NULL,
           permissions TEXT[] DEFAULT '{"read"}',
           tier VARCHAR(50) DEFAULT 'free',
           daily_quota INTEGER DEFAULT 1000,

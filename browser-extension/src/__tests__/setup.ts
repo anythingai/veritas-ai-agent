@@ -41,6 +41,17 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
+// Mock DOM event functions
+Object.defineProperty(window, 'dispatchEvent', {
+  writable: true,
+  value: vi.fn()
+});
+
+Object.defineProperty(document, 'dispatchEvent', {
+  writable: true,
+  value: vi.fn()
+});
+
 // Mock ResizeObserver
 global.ResizeObserver = vi.fn().mockImplementation(() => ({
   observe: vi.fn(),

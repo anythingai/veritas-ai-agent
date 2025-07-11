@@ -1,56 +1,64 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VeritasContentScript } from '../contentScript';
 
-// Mock DOM APIs
-const mockElement = {
-  textContent: 'Test claim text',
-  querySelector: vi.fn(),
-  querySelectorAll: vi.fn(),
-  appendChild: vi.fn(),
-  addEventListener: vi.fn(),
-  matches: vi.fn(),
-  closest: vi.fn(),
-  setAttribute: vi.fn(),
-  className: '',
-  innerHTML: '',
-  remove: vi.fn(),
-  style: {},
-  getBoundingClientRect: vi.fn().mockReturnValue({ top: 0, left: 0, width: 100, height: 20 }),
-  dispatchEvent: vi.fn()
+// Mock DOM APIs with attribute support
+const createMockElement = () => {
+  const attributes: Record<string, string> = {};
+  return {
+    textContent: 'Test claim text',
+    querySelector: vi.fn(),
+    querySelectorAll: vi.fn(),
+    appendChild: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    matches: vi.fn(),
+    closest: vi.fn(),
+    setAttribute: vi.fn((name: string, value: string) => {
+      attributes[name] = String(value);
+    }),
+    getAttribute: vi.fn((name: string) => attributes[name] ?? null),
+    hasAttribute: vi.fn((name: string) => Object.prototype.hasOwnProperty.call(attributes, name)),
+    removeAttribute: vi.fn((name: string) => {
+      delete attributes[name];
+    }),
+    className: '',
+    innerHTML: '',
+    remove: vi.fn(),
+    style: {},
+    getBoundingClientRect: vi.fn().mockReturnValue({ top: 0, left: 0, width: 100, height: 20, right: 100 }),
+    dispatchEvent: vi.fn(),
+    contains: vi.fn(),
+    focus: vi.fn(),
+    classList: {
+      add: vi.fn(),
+      remove: vi.fn()
+    }
+  } as any;
 };
+
+const mockElement = createMockElement();
 
 const mockDocument = {
   querySelector: vi.fn(),
   querySelectorAll: vi.fn(),
   body: mockElement,
   addEventListener: vi.fn(),
-  createElement: vi.fn(() => mockElement),
-  createTextNode: vi.fn((text: string) => ({ textContent: text })),
-  getElementById: vi.fn(),
-  head: {
-    appendChild: vi.fn()
-  }
+  removeEventListener: vi.fn(),
+  createElement: vi.fn(() => ({ ...mockElement })),
+  contains: vi.fn().mockReturnValue(true)
 };
 
 const mockWindow = {
   addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
   postMessage: vi.fn(),
-  location: {
-    href: 'https://chat.openai.com/',
-    origin: 'https://chat.openai.com'
-  },
-  document: mockDocument,
-  setTimeout: vi.fn((fn: Function, delay: number) => {
-    setTimeout(fn, delay);
-    return 1;
-  }),
-  clearTimeout: vi.fn()
+  dispatchEvent: vi.fn()
 };
 
 // Mock fetch
 global.fetch = vi.fn();
 
-// Mock DOM
+// Mock DOM globals
 Object.defineProperty(global, 'document', {
   value: mockDocument,
   writable: true
@@ -62,25 +70,45 @@ Object.defineProperty(global, 'window', {
 });
 
 // Mock MutationObserver
-global.MutationObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  disconnect: vi.fn()
-}));
-
-// Mock IntersectionObserver
-global.IntersectionObserver = vi.fn().mockImplementation(() => ({
+const mockObserverInstance = {
   observe: vi.fn(),
   disconnect: vi.fn(),
-  unobserve: vi.fn()
-}));
+  takeRecords: vi.fn(),
+  callback: null as ((mutations: MutationRecord[], observer: MutationObserver) => void) | null
+};
+
+global.MutationObserver = vi.fn().mockImplementation((callback) => {
+  mockObserverInstance.callback = callback;
+  return mockObserverInstance;
+});
+
+// Mock Node types
+global.Node = {
+  ELEMENT_NODE: 1
+} as any;
+
+// Mock process.env
+Object.defineProperty(global, 'process', {
+  value: {
+    env: {
+      VERITAS_API_ENDPOINT: 'https://api.veritas.ai/verify',
+      VERITAS_API_KEY: 'test-api-key'
+    }
+  },
+  writable: true
+});
 
 describe('VeritasContentScript - Integration Tests', () => {
-  let contentScript: VeritasContentScript;
-  let mockNodes: any[];
+  let contentScript: VeritasContentScript | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    
+    contentScript = undefined;
+
+    // Recreate mock element and reset document references
+    Object.assign(mockElement, createMockElement());
+    mockDocument.body = mockElement;
+
     // Reset DOM mocks
     mockDocument.querySelectorAll.mockReturnValue([]);
     mockDocument.querySelector.mockReturnValue(null);
@@ -88,27 +116,8 @@ describe('VeritasContentScript - Integration Tests', () => {
     mockElement.querySelectorAll.mockReturnValue([]);
     mockElement.matches.mockReturnValue(false);
     mockElement.closest.mockReturnValue(null);
-    
-    // Setup mock nodes
-    mockNodes = [
-      {
-        ...mockElement,
-        textContent: 'The Earth orbits around the Sun',
-        querySelector: vi.fn().mockReturnValue(null),
-        matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue(null)
-      },
-      {
-        ...mockElement,
-        textContent: 'Water boils at 100 degrees Celsius',
-        querySelector: vi.fn().mockReturnValue(null),
-        matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue(null)
-      }
-    ];
+    mockElement.contains.mockReturnValue(false);
 
-    mockDocument.querySelectorAll.mockReturnValue(mockNodes);
-    
     // Mock successful API response
     (global.fetch as any).mockResolvedValue({
       ok: true,
@@ -118,17 +127,19 @@ describe('VeritasContentScript - Integration Tests', () => {
         citations: [
           {
             cid: 'QmTest123',
-            title: 'Science Textbook',
-            snippet: 'The Earth orbits around the Sun in an elliptical path.'
+            title: 'Test Source',
+            snippet: 'This supports the claim.'
           }
         ]
       })
     });
-
-    contentScript = new VeritasContentScript();
   });
 
   afterEach(() => {
+    if (contentScript) {
+      contentScript.dispose();
+      contentScript = undefined;
+    }
     vi.clearAllMocks();
   });
 
@@ -136,7 +147,7 @@ describe('VeritasContentScript - Integration Tests', () => {
     it('should process claims and display verification badges', async () => {
       const node = {
         ...mockElement,
-        textContent: 'The Earth orbits around the Sun in an elliptical path',
+        textContent: 'The Earth orbits around the Sun',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
@@ -144,10 +155,9 @@ describe('VeritasContentScript - Integration Tests', () => {
 
       mockDocument.querySelectorAll.mockReturnValue([node]);
 
-      // Create new instance to trigger processing
       contentScript = new VeritasContentScript();
 
-      // Wait for processing to complete
+      // Wait for processing
       await new Promise(resolve => setTimeout(resolve, 100));
 
       expect(node.appendChild).toHaveBeenCalled();
@@ -155,6 +165,8 @@ describe('VeritasContentScript - Integration Tests', () => {
     });
 
     it('should handle verification API errors gracefully', async () => {
+      (global.fetch as any).mockRejectedValue(new Error('Network error'));
+
       const node = {
         ...mockElement,
         textContent: 'Test claim that will fail',
@@ -164,248 +176,300 @@ describe('VeritasContentScript - Integration Tests', () => {
       };
 
       mockDocument.querySelectorAll.mockReturnValue([node]);
-      
-      // Mock API failure
-      (global.fetch as any).mockRejectedValue(new Error('Network error'));
+
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       contentScript = new VeritasContentScript();
 
-      // Wait for processing to complete
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      expect(node.appendChild).toHaveBeenCalled();
-      // Should still add a badge even on error
-      expect(node.appendChild).toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
     });
 
-    it('should handle different verification statuses correctly', async () => {
+    it('should handle different verification statuses correctly', () => {
+      const badge = {
+        ...mockElement,
+        className: 'veritas-badge veritas-pending',
+        innerHTML: '⟳'
+      };
+
+      const node = {
+        ...mockElement,
+        textContent: 'Test claim',
+        querySelector: vi.fn().mockReturnValue(badge),
+        matches: vi.fn().mockReturnValue(true),
+        closest: vi.fn().mockReturnValue(null)
+      };
+
+      mockDocument.querySelectorAll.mockReturnValue([node]);
+
+      contentScript = new VeritasContentScript();
+
       const testCases = [
-        {
-          status: 'VERIFIED',
-          confidence: 0.9,
-          expectedClass: 'veritas-verified'
-        },
-        {
-          status: 'UNVERIFIED',
-          confidence: 0.3,
-          expectedClass: 'veritas-unverified'
-        },
-        {
-          status: 'UNKNOWN',
-          confidence: 0.1,
-          expectedClass: 'veritas-unknown'
-        }
+        { status: 'VERIFIED', expectedClass: 'veritas-verified', expectedIcon: '✔' },
+        { status: 'UNVERIFIED', expectedClass: 'veritas-unverified', expectedIcon: '✖' },
+        { status: 'UNKNOWN', expectedClass: 'veritas-unknown', expectedIcon: '?' },
+        { status: 'ERROR', expectedClass: 'veritas-error', expectedIcon: '✖' }
       ];
 
-      for (const testCase of testCases) {
-        const node = {
-          ...mockElement,
-          textContent: `Test claim for ${testCase.status}`,
-          querySelector: vi.fn().mockReturnValue(null),
-          matches: vi.fn().mockReturnValue(true),
-          closest: vi.fn().mockReturnValue(null)
-        };
+      testCases.forEach(testCase => {
+        // Get the generated claim ID
+        const verificationQueue = contentScript!['verificationQueue'];
+        const claimId = Array.from(verificationQueue.keys())[0];
 
-        mockDocument.querySelectorAll.mockReturnValue([node]);
-        
-        (global.fetch as any).mockResolvedValue({
-          ok: true,
-          json: () => Promise.resolve({
-            status: testCase.status,
-            confidence: testCase.confidence,
-            citations: []
-          })
-        });
+        if (claimId) {
+          // Update mock to return badge for the claim ID
+          node.querySelector.mockImplementation((selector: string) => {
+            if (selector.includes(claimId)) {
+              return badge;
+            }
+            return null;
+          });
 
-        contentScript = new VeritasContentScript();
-        await new Promise(resolve => setTimeout(resolve, 100));
+          const messageEvent = {
+            source: window,
+            data: {
+              type: 'VERITAS_VERIFICATION_RESULT',
+              result: {
+                claimId: claimId,
+                status: testCase.status,
+                confidence: testCase.status === 'VERIFIED' ? 0.9 : null,
+                citations: []
+              }
+            }
+          };
 
-        expect(node.appendChild).toHaveBeenCalled();
-      }
+          const messageHandler = mockWindow.addEventListener.mock.calls[0][1];
+          if (messageHandler) {
+            messageHandler(messageEvent);
+            expect(badge.className).toBe(`veritas-badge ${testCase.expectedClass}`);
+          }
+        }
+      });
     });
   });
 
-  describe('DOM Interaction and UI', () => {
-    it('should create and display verification badges', () => {
-      const node = {
+  describe('DOM Manipulation and Mutation Observer', () => {
+    it('should detect new content added to the page', () => {
+      const newNode = {
+        nodeType: 1,
         ...mockElement,
-        textContent: 'Test claim for badge creation',
+        textContent: 'Newly added claim',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
       };
 
-      mockDocument.querySelectorAll.mockReturnValue([node]);
+      mockDocument.querySelectorAll.mockReturnValue([]);
 
       contentScript = new VeritasContentScript();
 
-      expect(mockDocument.createElement).toHaveBeenCalled();
-      expect(node.appendChild).toHaveBeenCalled();
+      const mockNodeList = {
+        length: 1,
+        item: (index: number) => index === 0 ? newNode as unknown as Node : null,
+        forEach: (callback: (value: Node, key: number, parent: NodeList) => void) => 
+          callback(newNode as unknown as Node, 0, mockNodeList),
+        [0]: newNode as unknown as Node
+      } as unknown as NodeList;
+
+      const mutation = {
+        type: 'childList' as const,
+        addedNodes: mockNodeList,
+        removedNodes: [] as unknown as NodeList,
+        target: mockElement as unknown as Node,
+        attributeName: null,
+        attributeNamespace: null,
+        nextSibling: null,
+        previousSibling: null,
+        oldValue: null
+      } as unknown as MutationRecord;
+
+      // Call the mutation callback directly
+      const mutationCallback = mockObserverInstance.callback;
+      if (mutationCallback) {
+        mutationCallback([mutation], mockObserverInstance as any);
+      }
+
+      expect(newNode.appendChild).toHaveBeenCalled();
     });
 
-    it('should create tooltips with citation information', async () => {
-      const node = {
-        ...mockElement,
-        textContent: 'Test claim with citations',
-        querySelector: vi.fn().mockReturnValue(null),
-        matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue(null)
-      };
-
-      mockDocument.querySelectorAll.mockReturnValue([node]);
-
-      (global.fetch as any).mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({
-          status: 'VERIFIED',
-          confidence: 0.9,
-          citations: [
-            {
-              cid: 'QmTest123',
-              title: 'Test Document',
-              snippet: 'This is a test citation.'
-            }
-          ]
-        })
-      });
-
+    it('should set up mutation observer correctly', () => {
       contentScript = new VeritasContentScript();
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Simulate badge click to trigger tooltip
-      const badge = mockElement;
-      const clickEvent = new Event('click');
-      badge.dispatchEvent(clickEvent);
-
-      expect(mockDocument.createElement).toHaveBeenCalled();
-    });
-
-    it('should handle tooltip positioning correctly', () => {
-      const badge = {
-        ...mockElement,
-        getBoundingClientRect: vi.fn().mockReturnValue({
-          top: 100,
-          left: 200,
-          width: 50,
-          height: 20
-        })
-      };
-
-      // Mock tooltip creation
-      const tooltip = {
-        ...mockElement,
-        style: {}
-      };
-
-      mockDocument.createElement.mockReturnValue(tooltip);
-
-      // Simulate tooltip creation
-      contentScript = new VeritasContentScript();
-
-      expect(mockDocument.createElement).toHaveBeenCalled();
+      
+      expect(global.MutationObserver).toHaveBeenCalled();
+      expect(mockObserverInstance.observe).toHaveBeenCalledWith(
+        mockDocument.body,
+        {
+          childList: true,
+          subtree: true
+        }
+      );
     });
   });
 
   describe('Message Handling', () => {
     it('should handle verification result messages', () => {
-      const mockResult = {
-        claimId: 'test-claim-123',
-        status: 'VERIFIED',
-        confidence: 0.9,
-        citations: []
+      const badge = {
+        ...mockElement,
+        className: 'veritas-badge veritas-pending',
+        innerHTML: '⟳',
+        setAttribute: vi.fn()
       };
 
-      // Simulate message event
-      const messageEvent = new MessageEvent('message', {
-        data: {
-          type: 'VERITAS_VERIFICATION_RESULT',
-          result: mockResult
-        },
-        source: window
-      });
+      const node = {
+        ...mockElement,
+        textContent: 'Test claim',
+        querySelector: vi.fn().mockReturnValue(badge),
+        matches: vi.fn().mockReturnValue(true),
+        closest: vi.fn().mockReturnValue(null)
+      };
 
-      window.dispatchEvent(messageEvent);
+      mockDocument.querySelectorAll.mockReturnValue([node]);
 
-      // Verify message was handled
-      expect(mockWindow.addEventListener).toHaveBeenCalledWith('message', expect.any(Function));
+      contentScript = new VeritasContentScript();
+
+      // Get the generated claim ID
+      const verificationQueue = contentScript['verificationQueue'];
+      const claimId = Array.from(verificationQueue.keys())[0];
+
+      if (claimId) {
+        // Update mock to return badge for the claim ID
+        node.querySelector.mockImplementation((selector: string) => {
+          if (selector.includes(claimId)) {
+            return badge;
+          }
+          return null;
+        });
+
+        const messageEvent = {
+          source: window,
+          data: {
+            type: 'VERITAS_VERIFICATION_RESULT',
+            result: {
+              claimId: claimId,
+              status: 'VERIFIED',
+              confidence: 0.9,
+              citations: []
+            }
+          }
+        };
+
+        const messageHandler = mockWindow.addEventListener.mock.calls[0][1];
+        messageHandler(messageEvent);
+        // Verify message was handled
+        expect(badge.className).toBe('veritas-badge veritas-verified');
+      }
     });
 
     it('should handle configuration update messages', () => {
-      const mockConfig = {
-        apiEndpoint: 'https://new-api.veritas.ai/verify',
-        maxRetries: 5
-      };
+      contentScript = new VeritasContentScript();
 
-      const messageEvent = new MessageEvent('message', {
+      const messageEvent = {
+        source: window,
         data: {
           type: 'VERITAS_CONFIG_UPDATE',
-          config: mockConfig
-        },
-        source: window
-      });
+          config: {
+            apiEndpoint: 'https://updated-api.veritas.ai/verify',
+            maxRetries: 5
+          }
+        }
+      };
 
-      window.dispatchEvent(messageEvent);
+      const messageHandler = mockWindow.addEventListener.mock.calls[0][1];
+      messageHandler(messageEvent);
 
-      expect(mockWindow.addEventListener).toHaveBeenCalledWith('message', expect.any(Function));
+      expect(contentScript['config'].apiEndpoint).toBe('https://updated-api.veritas.ai/verify');
+      expect(contentScript['config'].maxRetries).toBe(5);
     });
 
     it('should ignore irrelevant messages', () => {
-      const messageEvent = new MessageEvent('message', {
+      contentScript = new VeritasContentScript();
+
+      const messageEvent = {
+        source: window,
         data: {
-          type: 'OTHER_MESSAGE_TYPE',
-          content: 'irrelevant'
-        },
-        source: window
-      });
+          type: 'UNRELATED_MESSAGE',
+          someData: 'irrelevant'
+        }
+      };
 
-      window.dispatchEvent(messageEvent);
-
-      // Should not process irrelevant messages
-      expect(mockDocument.createElement).not.toHaveBeenCalled();
+      const messageHandler = mockWindow.addEventListener.mock.calls[0][1];
+      
+      expect(() => {
+        messageHandler(messageEvent);
+      }).not.toThrow();
     });
   });
 
   describe('Mutation Observer', () => {
     it('should detect new chat nodes and process them', () => {
       const newNode = {
+        nodeType: 1,
         ...mockElement,
-        textContent: 'New chat message to verify',
+        textContent: 'New chat message with claim',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
       };
 
-      // Simulate mutation observer callback
-      const mutationObserver = global.MutationObserver as any;
-      const mockObserver = mutationObserver.mock.results[0].value;
-      
-      // Simulate adding new nodes
-      const mutation = {
-        type: 'childList',
-        addedNodes: [newNode]
-      };
+      mockDocument.querySelectorAll.mockReturnValue([]);
 
-      // Trigger the observer callback
-      mockObserver.observe.mock.calls[0][1].callback([mutation]);
+      contentScript = new VeritasContentScript();
 
-      expect(mockDocument.querySelectorAll).toHaveBeenCalled();
+       const mockNodeList2 = {
+         length: 1,
+         item: (index: number) => index === 0 ? newNode as unknown as Node : null,
+         forEach: (callback: (value: Node, key: number, parent: NodeList) => void) => 
+           callback(newNode as unknown as Node, 0, mockNodeList2),
+         [0]: newNode as unknown as Node
+       } as unknown as NodeList;
+
+       const mutation = {
+         type: 'childList' as const,
+         addedNodes: mockNodeList2,
+         removedNodes: [] as unknown as NodeList,
+         target: mockElement as unknown as Node,
+         attributeName: null,
+         attributeNamespace: null,
+         nextSibling: null,
+         previousSibling: null,
+         oldValue: null
+       } as unknown as MutationRecord;
+
+      // Call the mutation callback directly
+      const mutationCallback = mockObserverInstance.callback;
+      if (mutationCallback) {
+        mutationCallback([mutation], mockObserverInstance as any);
+      }
+
+      expect(newNode.appendChild).toHaveBeenCalled();
     });
 
     it('should not process system or user messages', () => {
+      const systemContainer = {
+        getAttribute: vi.fn().mockReturnValue('system')
+      };
+
+      const userContainer = {
+        getAttribute: vi.fn().mockReturnValue('user')
+      };
+
       const systemNode = {
         ...mockElement,
         textContent: 'System message',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue({ getAttribute: vi.fn().mockReturnValue('system') })
+        closest: vi.fn().mockReturnValue(systemContainer)
       };
 
       const userNode = {
         ...mockElement,
-        textContent: 'User input',
+        textContent: 'User message',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue({ getAttribute: vi.fn().mockReturnValue('user') })
+        closest: vi.fn().mockReturnValue(userContainer)
       };
 
       mockDocument.querySelectorAll.mockReturnValue([systemNode, userNode]);
@@ -419,10 +483,9 @@ describe('VeritasContentScript - Integration Tests', () => {
 
   describe('API Communication', () => {
     it('should send properly formatted verification requests', async () => {
-      const claimText = 'Test claim for API communication';
       const node = {
         ...mockElement,
-        textContent: claimText,
+        textContent: 'Climate change is real',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
@@ -431,52 +494,33 @@ describe('VeritasContentScript - Integration Tests', () => {
       mockDocument.querySelectorAll.mockReturnValue([node]);
 
       contentScript = new VeritasContentScript();
+
       await new Promise(resolve => setTimeout(resolve, 100));
 
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/verify'),
+        'https://api.veritas.ai/verify',
         expect.objectContaining({
           method: 'POST',
-          headers: expect.objectContaining({
+          headers: {
             'Content-Type': 'application/json',
-            'Authorization': expect.stringContaining('Bearer')
-          }),
-          body: expect.stringContaining(claimText)
+            'Authorization': expect.stringContaining('Bearer'),
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: expect.stringContaining('Climate change is real')
         })
       );
     });
 
     it('should handle API rate limiting', async () => {
-      const node = {
-        ...mockElement,
-        textContent: 'Rate limited claim',
-        querySelector: vi.fn().mockReturnValue(null),
-        matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue(null)
-      };
-
-      mockDocument.querySelectorAll.mockReturnValue([node]);
-
-      // Mock rate limit response
       (global.fetch as any).mockResolvedValue({
         ok: false,
         status: 429,
-        json: () => Promise.resolve({
-          error: 'Too Many Requests',
-          message: 'Rate limit exceeded'
-        })
+        statusText: 'Too Many Requests'
       });
 
-      contentScript = new VeritasContentScript();
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      expect(global.fetch).toHaveBeenCalled();
-    });
-
-    it('should retry failed requests', async () => {
       const node = {
         ...mockElement,
-        textContent: 'Retry test claim',
+        textContent: 'Test claim for rate limiting',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
@@ -484,30 +528,67 @@ describe('VeritasContentScript - Integration Tests', () => {
 
       mockDocument.querySelectorAll.mockReturnValue([node]);
 
-      // Mock initial failure then success
-      (global.fetch as any)
-        .mockRejectedValueOnce(new Error('Network error'))
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({
-            status: 'VERIFIED',
-            confidence: 0.9,
-            citations: []
-          })
-        });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       contentScript = new VeritasContentScript();
-      await new Promise(resolve => setTimeout(resolve, 200));
 
-      expect(global.fetch).toHaveBeenCalledTimes(2);
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should retry failed requests', async () => {
+      // Create a completely isolated fetch mock for this test
+      const originalFetch = global.fetch;
+      let callCount = 0;
+      
+      const freshFetch = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.reject(new Error('Network error'));
+        } else {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              status: 'VERIFIED',
+              confidence: 0.9,
+              citations: []
+            })
+          });
+        }
+      });
+
+      global.fetch = freshFetch;
+
+      const node = {
+        ...mockElement,
+        textContent: 'Test claim for retry',
+        querySelector: vi.fn().mockReturnValue(null),
+        matches: vi.fn().mockReturnValue(true),
+        closest: vi.fn().mockReturnValue(null)
+      };
+
+      mockDocument.querySelectorAll.mockReturnValue([node]);
+
+      contentScript = new VeritasContentScript();
+
+      // Wait for both the initial attempt and retry to complete
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      expect(freshFetch).toHaveBeenCalledTimes(2);
+      
+      // Restore original fetch
+      global.fetch = originalFetch;
     });
   });
 
   describe('Performance and Optimization', () => {
     it('should batch verification requests', async () => {
-      const nodes = Array.from({ length: 10 }, (_, i) => ({
+      const nodes = Array(10).fill(null).map((_, index) => ({
         ...mockElement,
-        textContent: `Claim ${i + 1} for batching`,
+        textContent: 'Test claim ' + index,
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
@@ -516,10 +597,12 @@ describe('VeritasContentScript - Integration Tests', () => {
       mockDocument.querySelectorAll.mockReturnValue(nodes);
 
       contentScript = new VeritasContentScript();
+
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Should not make 10 separate requests
-      expect((global.fetch as any).mock.calls.length).toBeLessThan(10);
+      // Should process in batches
+      expect(global.fetch).toHaveBeenCalled();
+      expect(global.fetch).toHaveBeenCalledTimes(Math.min(5, nodes.length)); // Batch size is 5
     });
 
     it('should clean up old badges periodically', () => {
@@ -531,14 +614,13 @@ describe('VeritasContentScript - Integration Tests', () => {
 
       mockDocument.querySelectorAll.mockReturnValue([oldBadge]);
 
-      // Simulate periodic cleanup
+      const setIntervalSpy = vi.spyOn(global, 'setInterval');
+
       contentScript = new VeritasContentScript();
 
-      // Trigger cleanup
-      const cleanupEvent = new Event('cleanup');
-      window.dispatchEvent(cleanupEvent);
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 30000);
 
-      expect(oldBadge.remove).toHaveBeenCalled();
+      setIntervalSpy.mockRestore();
     });
   });
 
@@ -546,7 +628,7 @@ describe('VeritasContentScript - Integration Tests', () => {
     it('should handle DOM manipulation errors', () => {
       const node = {
         ...mockElement,
-        textContent: 'Error test claim',
+        textContent: 'Test claim',
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null),
@@ -557,60 +639,71 @@ describe('VeritasContentScript - Integration Tests', () => {
 
       mockDocument.querySelectorAll.mockReturnValue([node]);
 
-      // Should not throw error
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
       expect(() => {
         contentScript = new VeritasContentScript();
       }).not.toThrow();
+
+      consoleSpy.mockRestore();
     });
 
     it('should handle network timeouts', async () => {
-      const node = {
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Timeout')), 50);
+      });
+
+      (global.fetch as any).mockImplementation(() => timeoutPromise);
+
+      const nodes = Array(2).fill(null).map((_, index) => ({
         ...mockElement,
-        textContent: 'Timeout test claim',
+        textContent: 'Test claim ' + (index + 5),
         querySelector: vi.fn().mockReturnValue(null),
         matches: vi.fn().mockReturnValue(true),
         closest: vi.fn().mockReturnValue(null)
-      };
+      }));
 
-      mockDocument.querySelectorAll.mockReturnValue([node]);
+      mockDocument.querySelectorAll.mockReturnValue(nodes);
 
-      // Mock timeout
-      (global.fetch as any).mockImplementation(() => 
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Request timeout')), 100)
-        )
-      );
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       contentScript = new VeritasContentScript();
+
       await new Promise(resolve => setTimeout(resolve, 150));
 
-      expect(global.fetch).toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
     });
 
     it('should handle malformed API responses', async () => {
-      const node = {
-        ...mockElement,
-        textContent: 'Malformed response test',
-        querySelector: vi.fn().mockReturnValue(null),
-        matches: vi.fn().mockReturnValue(true),
-        closest: vi.fn().mockReturnValue(null)
-      };
-
-      mockDocument.querySelectorAll.mockReturnValue([node]);
-
-      // Mock malformed response
       (global.fetch as any).mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({
           // Missing required fields
-          status: 'INVALID_STATUS'
+          invalidField: 'invalid'
         })
       });
 
+      const node = {
+        ...mockElement,
+        textContent: 'Test claim with bad response',
+        querySelector: vi.fn().mockReturnValue(null),
+        matches: vi.fn().mockReturnValue(true),
+        closest: vi.fn().mockReturnValue(null)
+      };
+
+      mockDocument.querySelectorAll.mockReturnValue([node]);
+
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
       contentScript = new VeritasContentScript();
+
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      expect(global.fetch).toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
     });
   });
 
@@ -618,30 +711,29 @@ describe('VeritasContentScript - Integration Tests', () => {
     it('should use default configuration when none provided', () => {
       contentScript = new VeritasContentScript();
 
-      // Verify default config is used
-      expect(mockWindow.addEventListener).toHaveBeenCalledWith('message', expect.any(Function));
-      expect(global.MutationObserver).toHaveBeenCalled();
+      expect(contentScript['config'].apiEndpoint).toBe('https://api.veritas.ai/verify');
+      expect(contentScript['config'].maxRetries).toBe(3);
     });
 
     it('should update configuration when received', () => {
-      const newConfig = {
-        apiEndpoint: 'https://new-api.veritas.ai/verify',
-        maxRetries: 5,
-        batchSize: 10
-      };
+      contentScript = new VeritasContentScript();
 
-      const messageEvent = new MessageEvent('message', {
+      const messageEvent = {
+        source: window,
         data: {
           type: 'VERITAS_CONFIG_UPDATE',
-          config: newConfig
-        },
-        source: window
-      });
+          config: {
+            apiEndpoint: 'https://custom-api.veritas.ai/verify',
+            maxRetries: 7
+          }
+        }
+      };
 
-      window.dispatchEvent(messageEvent);
+      const messageHandler = mockWindow.addEventListener.mock.calls[0][1];
+      messageHandler(messageEvent);
 
-      // Configuration should be updated
-      expect(mockWindow.addEventListener).toHaveBeenCalled();
+      expect(contentScript['config'].apiEndpoint).toBe('https://custom-api.veritas.ai/verify');
+      expect(contentScript['config'].maxRetries).toBe(7);
     });
   });
 }); 

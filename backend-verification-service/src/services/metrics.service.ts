@@ -440,10 +440,15 @@ export class MetricsService {
         todayStart.toISOString()
       );
       
-      // Get cache metrics
-      const cacheStats = await this.cacheService.getStats();
-      const cacheHitRate = cacheStats.hits > 0 ? 
-        cacheStats.hits / (cacheStats.hits + cacheStats.misses) : 0;
+      // Get cache metrics from internal counters
+      const metricsData = await register.getMetricsAsJSON();
+      const cacheHitsMetric = metricsData.find(m => m.name === 'cache_hits_total');
+      const cacheMissesMetric = metricsData.find(m => m.name === 'cache_misses_total');
+      
+      const cacheHits = cacheHitsMetric?.values?.[0]?.value || 0;
+      const cacheMisses = cacheMissesMetric?.values?.[0]?.value || 0;
+      const cacheHitRate = (cacheHits + cacheMisses) > 0 ? 
+        cacheHits / (cacheHits + cacheMisses) : 0;
       
       // Calculate error rate from stored metrics
       const errorRate = analytics.totalRequests > 0 ? 

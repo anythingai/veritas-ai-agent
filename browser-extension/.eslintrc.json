@@ -1,8 +1,8 @@
 {
   "env": {
-    "browser": false,
+    "browser": true,
     "es2021": true,
-    "node": true
+    "webextensions": true
   },
   "extends": [
     "eslint:recommended",
@@ -11,7 +11,10 @@
   "parser": "@typescript-eslint/parser",
   "parserOptions": {
     "ecmaVersion": "latest",
-    "sourceType": "module"
+    "sourceType": "module",
+    "ecmaFeatures": {
+      "jsx": true
+    }
   },
   "plugins": [
     "@typescript-eslint"
@@ -35,5 +38,5 @@
     "@typescript-eslint/explicit-function-return-type": "off",
     "@typescript-eslint/explicit-module-boundary-types": "off"
   },
-  "ignorePatterns": ["dist/", "node_modules/", "**/*.js"]
+  "ignorePatterns": ["dist/", "node_modules/", "**/*.js", "webpack.config.js"]
 } 
